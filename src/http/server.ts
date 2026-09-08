@@ -4,6 +4,7 @@ import { StoreError } from "../store/jsonFileStore.ts";
 import { ValidationError } from "../domain/validate.ts";
 import { buildHandoff } from "../domain/handoff.ts";
 import { createDemoShift } from "../demo/demo.ts";
+import { DeterministicEventInterpreter, InterpretationError, type EventInterpreter } from "../ingest/interpreter.ts";
 import { renderUi } from "./ui.ts";
 
 export interface RunningServer {
@@ -19,10 +20,16 @@ const MAX_BODY_BYTES = 1024 * 1024;
  * the API surface is small and explicit routing is easier to audit than
  * framework magic at this size.
  */
-export function startServer(options: { store: ShiftStore; port?: number }): RunningServer {
+export function startServer(options: {
+  store: ShiftStore;
+  port?: number;
+  /** Natural-language interpreter; injectable so tests never call an LLM. */
+  interpreter?: EventInterpreter;
+}): RunningServer {
   const { store } = options;
+  const interpreter = options.interpreter ?? new DeterministicEventInterpreter();
   const nodeServer = createServer((req, res) => {
-    handle(req, res, store).catch((err) => {
+    handle(req, res, store, interpreter).catch((err) => {
       sendJson(res, 500, { error: "internal error" });
       // Surface unexpected failures loudly; never swallow them silently.
       console.error(err);
@@ -42,7 +49,12 @@ export function startServer(options: { store: ShiftStore; port?: number }): Runn
   });
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, store: ShiftStore): Promise<void> {
+async function handle(
+  req: IncomingMessage,
+  res: ServerResponse,
+  store: ShiftStore,
+  interpreter: EventInterpreter,
+): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const parts = url.pathname.split("/").filter(Boolean);
   const method = req.method ?? "GET";
@@ -82,8 +94,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: ShiftSto
   const shiftId = parts[2]!;
   const sub = parts[3];
 
-  // /api/shifts/:id/events
-  if (sub === "events") {
+  // /api/shifts/:id/events  (parts[4] === undefined keeps /events/nl below out of this branch)
+  if (sub === "events" && parts[4] === undefined) {
     if (method === "GET") {
       if (!store.getShift(shiftId)) return sendJson(res, 404, { error: "unknown shift" });
       sendJson(res, 200, store.getEvents(shiftId));
@@ -111,6 +123,33 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: ShiftSto
       }
       return;
     }
+  }
+
+  // POST /api/shifts/:id/events/nl — natural-language report → structured event.
+  if (sub === "events" && parts[4] === "nl" && method === "POST") {
+    const body = await readJson(req, res);
+    if (body === undefined) return;
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text) return sendJson(res, 400, { error: "text is required" });
+    try {
+      const interpreted = interpreter.interpret({ text });
+      const event = {
+        ...interpreted,
+        id: crypto.randomUUID(),
+        shiftId,
+        occurredAt: typeof body.occurredAt === "string" && body.occurredAt ? body.occurredAt : new Date().toISOString(),
+      };
+      store.appendEvent(event);
+      sendJson(res, 201, event);
+    } catch (err) {
+      // Both a failed interpretation and schema-invalid interpreter output
+      // are client errors; nothing is persisted in either case (§6).
+      if (err instanceof InterpretationError || err instanceof ValidationError) {
+        return sendJson(res, 400, { error: err.message });
+      }
+      sendDomainError(res, err);
+    }
+    return;
   }
 
   // /api/shifts/:id/state

@@ -57,7 +57,13 @@ export function renderUi(): string {
 </section>
 
 <section id="eventSection" hidden>
-  <h2>Add Event</h2>
+  <h2>Report in plain words</h2>
+  <div class="row">
+    <input id="nlText" placeholder="Pallet 83 couldn't go out because aisle 7 is blocked" style="flex:1">
+    <button id="nlBtn">Add</button>
+  </div>
+  <p class="muted">Understood shapes: problems with/without cause, cleared, completed, dispositions ("case D104 should go to claims"). Anything else is refused, not guessed.</p>
+  <h2>Add Event (structured)</h2>
   <form id="eventForm">
     <div class="row">
       <label>When <input type="datetime-local" id="occurredAt" required></label>
@@ -217,6 +223,18 @@ $("demoBtn").addEventListener("click", async () => {
 });
 
 $("loadBtn").addEventListener("click", loadShift);
+
+$("nlBtn").addEventListener("click", async () => {
+  showError("");
+  try {
+    await api(\`/api/shifts/\${currentShift.id}/events/nl\`, {
+      method: "POST",
+      body: JSON.stringify({ text: $("nlText").value, occurredAt: new Date($("occurredAt").value).toISOString() }),
+    });
+    $("nlText").value = "";
+    await loadShift();
+  } catch (err) { showError(err.message); }
+});
 
 $("endBtn").addEventListener("click", async () => {
   showError("");
