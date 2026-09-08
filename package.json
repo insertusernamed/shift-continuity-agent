@@ -1,0 +1,24 @@
+{
+  "name": "shift-continuity-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Autonomous shift handoff system: tracks operational events and surfaces only what still matters to the next shift.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
