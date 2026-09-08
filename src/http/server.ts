@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { OperationalEvent } from "../domain/types.ts";
 import type { ShiftStore } from "../store/jsonFileStore.ts";
 import { StoreError } from "../store/jsonFileStore.ts";
 import { ValidationError } from "../domain/validate.ts";
@@ -25,7 +26,7 @@ export function startServer(options: {
   port?: number;
   /** Natural-language interpreter; injectable so tests never call an LLM. */
   interpreter?: EventInterpreter;
-}): RunningServer {
+}): Promise<RunningServer> {
   const { store } = options;
   const interpreter = options.interpreter ?? new DeterministicEventInterpreter();
   const nodeServer = createServer((req, res) => {
@@ -36,7 +37,7 @@ export function startServer(options: {
     });
   });
 
-  return new Promise((resolve) => {
+  return new Promise<RunningServer>((resolve) => {
     nodeServer.listen(options.port ?? 0, "127.0.0.1", () => {
       const address = nodeServer.address();
       const port = typeof address === "object" && address ? address.port : 0;
@@ -65,8 +66,17 @@ async function handle(
     return;
   }
 
-  if (parts[0] !== "api" || parts[1] !== "shifts") {
+  const isShiftRoute = parts[0] === "api" && parts[1] === "shifts";
+  const isDemoRoute = url.pathname === "/api/demo-shift";
+  if (!isShiftRoute && !isDemoRoute) {
     sendJson(res, 404, { error: "not found" });
+    return;
+  }
+
+  // POST /api/demo-shift — seed the Phase 6 demo scenario.
+  if (isDemoRoute) {
+    if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+    sendJson(res, 201, createDemoShift(store));
     return;
   }
 
@@ -105,16 +115,18 @@ async function handle(
       const body = await readJson(req, res);
       if (body === undefined) return;
       try {
+        // The HTTP body is untrusted input; validateEvent at the store
+        // boundary is the schema gate (§6) before anything persists.
         const event = {
           id: crypto.randomUUID(),
           shiftId,
-          occurredAt: body.occurredAt,
-          kind: body.kind,
-          subject: body.subject,
-          description: body.description,
+          occurredAt: body.occurredAt as string,
+          kind: body.kind as OperationalEvent["kind"],
+          subject: body.subject as string,
+          description: body.description as string,
           source: typeof body.source === "string" && body.source.trim() ? body.source : "operator",
-          claim: body.claim,
-          blockedBy: body.blockedBy,
+          ...(typeof body.claim === "string" ? { claim: body.claim } : {}),
+          ...(typeof body.blockedBy === "string" ? { blockedBy: body.blockedBy } : {}),
         };
         store.appendEvent(event);
         sendJson(res, 201, event);
@@ -175,12 +187,6 @@ async function handle(
     } catch (err) {
       sendDomainError(res, err);
     }
-    return;
-  }
-
-  // POST /api/demo-shift — seed the Phase 6 demo scenario.
-  if (url.pathname === "/api/demo-shift" && method === "POST") {
-    sendJson(res, 201, createDemoShift(store));
     return;
   }
 

@@ -2,7 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { foldState } from "./state.ts";
 import { validateEvent } from "./validate.ts";
-import type { OperationalEvent } from "./types.ts";
+import type { OperationalEvent, Shift } from "./types.ts";
+
+const TEST_SHIFT: Shift = { id: "shift-1", name: "Test Shift", startedAt: "2026-09-08T02:00:00.000Z" };
 
 // Deterministic local helper: every event in these tests is fully valid,
 // so tests stay focused on state behavior rather than validation.
@@ -24,7 +26,7 @@ function itemFor(items: ReturnType<typeof foldState>["items"], subjectPart: stri
 
 describe("scenario 1: unresolved item survives", () => {
   it("freezer inspection appears as open", () => {
-    const state = foldState("shift-1", [
+    const state = foldState(TEST_SHIFT, [
       ev({ occurredAt: "2026-09-08T04:46:00Z", kind: "problem_reported", subject: "freezer inspection", description: "freezer inspection missed" }),
     ]);
     const item = itemFor(state.items, "freezer");
@@ -35,7 +37,7 @@ describe("scenario 1: unresolved item survives", () => {
 });
 
 describe("scenario 2: resolved problem disappears", () => {
-  const state = foldState("shift-1", [
+  const state = foldState(TEST_SHIFT, [
     ev({ occurredAt: "2026-09-08T02:11:00Z", kind: "problem_reported", subject: "aisle 7", description: "aisle 7 blocked by pallet jack" }),
     ev({ occurredAt: "2026-09-08T03:04:00Z", kind: "cleared", subject: "aisle 7", description: "aisle 7 cleared" }),
   ]);
@@ -52,7 +54,7 @@ describe("scenario 2: resolved problem disappears", () => {
 });
 
 describe("scenario 3: dependent work eventually resolves", () => {
-  const state = foldState("shift-1", [
+  const state = foldState(TEST_SHIFT, [
     ev({ occurredAt: "2026-09-08T02:11:00Z", kind: "problem_reported", subject: "aisle 7", description: "aisle 7 blocked" }),
     ev({ occurredAt: "2026-09-08T02:37:00Z", kind: "problem_reported", subject: "pallet 83", description: "pallet 83 cannot be worked", blockedBy: "aisle 7" }),
     ev({ occurredAt: "2026-09-08T03:04:00Z", kind: "cleared", subject: "aisle 7", description: "aisle 7 cleared" }),
@@ -77,7 +79,7 @@ describe("scenario 6: chronology matters", () => {
   it("a backdated older event never overwrites newer state", () => {
     // Events arrive out of chronological order (late scanner sync): the
     // "cleared" event is appended to the list BEFORE the backdated block report.
-    const state = foldState("shift-1", [
+    const state = foldState(TEST_SHIFT, [
       ev({ occurredAt: "2026-09-08T03:04:00Z", kind: "cleared", subject: "aisle 7", description: "aisle 7 cleared" }),
       ev({ occurredAt: "2026-09-08T02:11:00Z", kind: "problem_reported", subject: "aisle 7", description: "aisle 7 blocked" }),
     ]);
@@ -93,7 +95,7 @@ describe("scenario 6: chronology matters", () => {
 });
 
 describe("scenario 7: complete history remains available", () => {
-  const state = foldState("shift-1", [
+  const state = foldState(TEST_SHIFT, [
     ev({ occurredAt: "2026-09-08T02:11:00Z", kind: "problem_reported", subject: "aisle 7", description: "aisle 7 blocked" }),
     ev({ occurredAt: "2026-09-08T03:04:00Z", kind: "cleared", subject: "aisle 7", description: "aisle 7 cleared" }),
   ]);

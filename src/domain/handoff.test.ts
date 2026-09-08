@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { foldState } from "./state.ts";
 import { buildHandoff } from "./handoff.ts";
 import { validateEvent } from "./validate.ts";
-import type { OperationalEvent } from "./types.ts";
+import type { OperationalEvent, Shift } from "./types.ts";
+
+const TEST_SHIFT: Shift = { id: "shift-1", name: "Test Shift", startedAt: "2026-09-08T02:00:00.000Z" };
 
 function ev(partial: Omit<OperationalEvent, "id" | "shiftId" | "source"> & { source?: string }): OperationalEvent {
   const candidate: OperationalEvent = {
@@ -22,7 +24,7 @@ function itemFor(items: ReturnType<typeof foldState>["items"], subjectPart: stri
 }
 
 describe("scenario 4: conflict remains visible", () => {
-  const state = foldState("shift-1", [
+  const state = foldState(TEST_SHIFT, [
     ev({ occurredAt: "2026-09-08T05:02:00Z", kind: "status_claimed", subject: "damaged case D104", description: "send to claims", claim: "send to claims", source: "scanner" }),
     ev({ occurredAt: "2026-09-08T05:14:00Z", kind: "status_claimed", subject: "damaged case D104", description: "discarded", claim: "discarded", source: "operator" }),
   ]);
@@ -44,7 +46,7 @@ describe("scenario 4: conflict remains visible", () => {
   });
 
   it("a decision reconciles the conflict", () => {
-    const reconciled = foldState("shift-1", [
+    const reconciled = foldState(TEST_SHIFT, [
       ev({ occurredAt: "2026-09-08T05:02:00Z", kind: "status_claimed", subject: "damaged case D104", description: "send to claims", claim: "send to claims" }),
       ev({ occurredAt: "2026-09-08T05:14:00Z", kind: "status_claimed", subject: "damaged case D104", description: "discarded", claim: "discarded" }),
       ev({ occurredAt: "2026-09-08T05:40:00Z", kind: "decision_recorded", subject: "damaged case D104", description: "shift lead: went to claims", claim: "send to claims", source: "shift-lead" }),
@@ -55,7 +57,7 @@ describe("scenario 4: conflict remains visible", () => {
 });
 
 describe("scenario 5: noise is omitted", () => {
-  const state = foldState("shift-1", [
+  const state = foldState(TEST_SHIFT, [
     ev({ occurredAt: "2026-09-08T02:11:00Z", kind: "problem_reported", subject: "aisle 7", description: "aisle 7 blocked" }),
     ev({ occurredAt: "2026-09-08T02:37:00Z", kind: "problem_reported", subject: "pallet 83", description: "cannot be worked", blockedBy: "aisle 7" }),
     ev({ occurredAt: "2026-09-08T03:04:00Z", kind: "cleared", subject: "aisle 7", description: "aisle 7 cleared" }),
@@ -77,7 +79,7 @@ describe("scenario 5: noise is omitted", () => {
 });
 
 describe("phase 6 demo scenario: exact handoff expectation", () => {
-  const state = foldState("shift-1", [
+  const state = foldState(TEST_SHIFT, [
     ev({ occurredAt: "2026-09-08T02:11:00Z", kind: "problem_reported", subject: "aisle 7", description: "aisle 7 blocked" }),
     ev({ occurredAt: "2026-09-08T02:37:00Z", kind: "problem_reported", subject: "pallet 83", description: "pallet 83 cannot be worked because aisle 7 is blocked", blockedBy: "aisle 7" }),
     ev({ occurredAt: "2026-09-08T03:04:00Z", kind: "cleared", subject: "aisle 7", description: "aisle 7 cleared" }),

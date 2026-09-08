@@ -86,7 +86,8 @@ describe("NL ingestion endpoint", () => {
   it("validates interpreter output against the event schema before persisting", async () => {
     // Simulated misbehaving LLM: confidently returns invalid structured output.
     const badInterpreter: EventInterpreter = {
-      interpret: () => ({ kind: "everything_is_fine", subject: "", description: "" }),
+      // Deliberately malformed: TS types can't express hostile LLM output.
+      interpret: (() => ({ kind: "everything_is_fine", subject: "", description: "" })) as unknown as EventInterpreter["interpret"],
     };
     const { shiftId, store } = await makeApp(badInterpreter);
     const res = await api("POST", `/api/shifts/${shiftId}/events/nl`, { text: "anything" });

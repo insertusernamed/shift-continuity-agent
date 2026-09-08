@@ -92,6 +92,19 @@ describe("HTTP API", () => {
     }
   });
 
+  it("regression: POST /api/demo-shift seeds the demo scenario (guard must not 404 it)", async () => {
+    const app = await makeApp();
+    try {
+      const res = await api(app.baseUrl, "POST", "/api/demo-shift");
+      assert.equal(res.status, 201);
+      assert.match(res.body.name, /demo/i);
+      const handoff = await api(app.baseUrl, "GET", `/api/shifts/${res.body.id}/handoff`);
+      assert.equal(handoff.body.requiresAction[0].subject, "freezer inspection");
+    } finally {
+      app.cleanup();
+    }
+  });
+
   it("returns 404 for unknown shift resources", async () => {
     const app = await makeApp();
     try {
