@@ -156,7 +156,7 @@ function itemCard(i) {
   const claims = (i.claims || []).map((c) => \`<li>\${esc(c.value)} <span class="muted">(\${fmt(c.occurredAt)})</span></li>\`).join("");
   const decision = i.decision ? \`<p><strong>Decision:</strong> \${esc(i.decision.value)}</p>\` : "";
   return \`<div class="card"><strong>\${esc(i.subject)}</strong> <span class="badge \${i.status}">\${STATUS_LABELS[i.status] || i.status}</span>
-    <p>\${esc(i.description)}</p>\${claims ? "<ul>" + claims + "</ul>" : ""}\${decision}\${i.blockedBySubjectKey ? \`<p class="muted">blocked by: \${esc(i.blockedBySubjectKey)}</p>\` : ""}</div>\`;
+    <p>\${esc(i.description)}</p>\${claims ? "<ul>" + claims + "</ul>" : ""}\${decision}\${i.blockedByCanonicalSubject ? \`<p class="muted">blocked by: \${esc(i.blockedByCanonicalSubject)}</p>\` : ""}</div>\`;
 }
 
 function renderHandoff(h) {

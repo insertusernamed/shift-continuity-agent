@@ -1,5 +1,5 @@
 import type { OperationalEvent } from "../domain/types.ts";
-import { subjectKey } from "../domain/validate.ts";
+import { canonicalSubject } from "../domain/subjects.ts";
 
 /**
  * What an interpreter owes the pipeline: structured, schema-checked intent
@@ -18,7 +18,7 @@ export interface EventInterpreter {
 export type InterpretedEvent = Omit<OperationalEvent, "id" | "shiftId" | "occurredAt">;
 
 /**
- * Rule-based interpreter: the always-available baseline. Matches
+ * Rule-based interpreter: the always-available offline baseline. Matches
  * case-insensitively but preserves the reporter's subject casing; anything
  * unparseable fails loudly instead of guessing.
  */
@@ -49,7 +49,7 @@ export class DeterministicEventInterpreter implements EventInterpreter {
         subject: causal[1]!.trim(),
         description: text,
         source: "nl-ingest",
-        ...(because ? { blockedBy: subjectKey(because[1]!) } : {}),
+        ...(because ? { blockedBy: canonicalSubject(because[1]!) } : {}),
       };
     }
 
@@ -91,3 +91,6 @@ function normalizeDisposition(raw: string): string {
 }
 
 export class InterpretationError extends Error {}
+
+/** Controlled failure for provider/network problems during interpretation. */
+export class ProviderError extends InterpretationError {}

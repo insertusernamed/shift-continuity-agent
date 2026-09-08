@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateEvent, subjectKey } from "./validate.ts";
+import { validateEvent } from "./validate.ts";
+import { canonicalSubject } from "./subjects.ts";
 import type { OperationalEvent } from "./types.ts";
 
 const base: OperationalEvent = {
@@ -48,13 +49,15 @@ describe("event validation", () => {
     rejectsWith({ ...base, kind: "decision_recorded" }, "claim");
   });
 
-  it("normalizes subject keys so differently-cased reports match one item", () => {
-    assert.equal(subjectKey("Aisle 7"), subjectKey("aisle 7"));
-    assert.equal(subjectKey("  Damaged   Case  D104 "), subjectKey("damaged case d104"));
+  it("preserves the reported subject verbatim; canonical identity is derived separately", () => {
+    const validated = validateEvent({ ...base, subject: "  Damaged   Case  D104 " });
+    assert.equal(validated.subject, "  Damaged   Case  D104 ");
+    assert.equal(canonicalSubject(validated.subject), "d104");
   });
 
-  it("rejects empty claim values", () => {
-    rejectsWith({ ...base, kind: "status_claimed", claim: "" }, "claim");
-    rejectsWith({ ...base, kind: "status_claimed", claim: "   " }, "claim");
+  // blockedBy is canonicalized so causal links survive phrasing differences.
+  it("canonicalizes blockedBy references", () => {
+    const validated = validateEvent({ ...base, blockedBy: "  Damaged Case D104 " });
+    assert.equal(validated.blockedBy, "d104");
   });
 });

@@ -67,7 +67,7 @@ describe("scenario 3: dependent work eventually resolves", () => {
   });
 
   it("keeps the causal link as explanatory context", () => {
-    assert.equal(itemFor(state.items, "pallet 83").blockedBySubjectKey, "aisle 7");
+    assert.equal(itemFor(state.items, "pallet 83").blockedByCanonicalSubject, "aisle 7");
   });
 
   it("keeps all four events in history", () => {

@@ -1,12 +1,5 @@
 import type { OperationalEvent, EventKind } from "./types.ts";
-
-/**
- * Normalized identity for matching events about the same subject.
- * Display casing is preserved on the event; only matching uses the key.
- */
-export function subjectKey(subject: string): string {
-  return subject.trim().toLowerCase().replace(/\s+/g, " ");
-}
+import { canonicalSubject } from "./subjects.ts";
 
 const EVENT_KINDS: readonly EventKind[] = [
   "problem_reported",
@@ -35,6 +28,8 @@ export function normalizeIso(value: string): string {
 /**
  * Schema validation for events arriving from any source (UI, seed, LLM).
  * Validation is deterministic domain logic; nothing bypasses it.
+ * The raw subject is preserved for history/display; canonical identity is
+ * derived separately by the fold (see subjects.ts).
  */
 export function validateEvent(candidate: unknown): OperationalEvent {
   if (typeof candidate !== "object" || candidate === null) {
@@ -61,10 +56,11 @@ export function validateEvent(candidate: unknown): OperationalEvent {
     }
   }
 
-  // blockedBy is causal context only; normalize it so links survive casing.
+  // blockedBy is causal context only; canonicalize it so links survive
+  // phrasing ("aisle 7" and "blocked aisle 7" refer to the same subject).
   const normalized: OperationalEvent = { ...event, occurredAt: normalizeIso(event.occurredAt) };
   if (isNonEmptyString(normalized.blockedBy)) {
-    normalized.blockedBy = subjectKey(normalized.blockedBy);
+    normalized.blockedBy = canonicalSubject(normalized.blockedBy);
   } else {
     delete normalized.blockedBy;
   }

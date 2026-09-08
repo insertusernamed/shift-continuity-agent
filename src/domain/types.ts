@@ -52,7 +52,10 @@ export interface OperationalEvent {
 /** One asserted value attached to a disposition item. */
 export interface DispositionClaim {
   eventId: string;
+  /** Raw reported text, preserved for history/display. */
   value: string;
+  /** Canonical concept used for conflict comparison (see claims.ts). */
+  canonicalValue: string;
   occurredAt: string;
 }
 
@@ -65,8 +68,8 @@ export interface OperationalItem {
   shiftId: string;
   category: ItemCategory;
   subject: string;
-  /** Normalized identity used to match events about the same subject. */
-  subjectKey: string;
+  /** Canonical identity used to match events about the same subject (see subjects.ts). */
+  canonicalSubject: string;
   description: string;
   status: ItemStatus;
   openedAt: string;
@@ -77,7 +80,7 @@ export interface OperationalItem {
   claims: DispositionClaim[];
   /** Present once a human decision reconciled the item. */
   decision?: DispositionClaim;
-  blockedBySubjectKey?: string;
+  blockedByCanonicalSubject?: string;
   resolvedAt?: string;
   resolvedByEventId?: string;
 }

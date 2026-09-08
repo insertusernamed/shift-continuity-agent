@@ -7,7 +7,8 @@ import type {
   ItemStatus,
   ItemCategory,
 } from "./types.ts";
-import { subjectKey } from "./validate.ts";
+import { canonicalSubject } from "./subjects.ts";
+import { canonicalClaim } from "./claims.ts";
 
 /**
  * Deterministic state machine: folds a chronological event log into the
@@ -16,6 +17,11 @@ import { subjectKey } from "./validate.ts";
  * Rules:
  * - Events are applied in occurredAt order, never arrival order, so a
  *   backdated older event cannot overwrite a newer known state.
+ * - Subjects are matched by canonical identity, not raw text, so equivalent
+ *   phrasings ("D104" / "damaged case D104") land on one item; the raw
+ *   reported subject is kept for display (AGENTS.md §7).
+ * - Claims are compared by canonical concept, so equivalent dispositions do
+ *   not create false conflicts while genuinely different ones still do.
  * - Nothing is discarded: every event lands in history and in the
  *   contributing set of the item it touched.
  * - Contradictory disposition claims are all kept and flip the item to
@@ -41,18 +47,18 @@ export function foldState(shift: Shift, events: OperationalEvent[]): ShiftState 
   };
 }
 
-function itemId(shiftId: string, key: string): string {
-  return `${shiftId}:${key}`;
+function itemId(shiftId: string, canonical: string): string {
+  return `${shiftId}:${canonical}`;
 }
 
 function newItem(event: OperationalEvent, category: ItemCategory): OperationalItem {
-  const key = subjectKey(event.subject);
+  const canonical = canonicalSubject(event.subject);
   const item: OperationalItem = {
-    id: itemId(event.shiftId, key),
+    id: itemId(event.shiftId, canonical),
     shiftId: event.shiftId,
     category,
     subject: event.subject.trim(),
-    subjectKey: key,
+    canonicalSubject: canonical,
     description: event.description,
     status: "open",
     openedAt: event.occurredAt,
@@ -60,13 +66,14 @@ function newItem(event: OperationalEvent, category: ItemCategory): OperationalIt
     contributingEventIds: [event.id],
     claims: [],
   };
-  if (event.blockedBy) item.blockedBySubjectKey = event.blockedBy;
+  if (event.blockedBy) item.blockedByCanonicalSubject = canonicalSubject(event.blockedBy);
   return item;
 }
 
 function applyEvent(items: Map<string, OperationalItem>, event: OperationalEvent): void {
-  const key = subjectKey(event.subject);
-  let item = items.get(itemId(event.shiftId, key));
+  const canonical = canonicalSubject(event.subject);
+  const key = itemId(event.shiftId, canonical);
+  let item = items.get(key);
 
   if (!item) {
     const category: ItemCategory =
@@ -86,7 +93,7 @@ function applyEvent(items: Map<string, OperationalItem>, event: OperationalEvent
       item.decision = toClaim(event);
       item.status = "decided";
     }
-    items.set(item.id, item);
+    items.set(key, item);
     return;
   }
 
@@ -98,7 +105,7 @@ function applyEvent(items: Map<string, OperationalItem>, event: OperationalEvent
       // guarantees this cannot be an older event overwriting newer state.
       item.status = "open";
       item.description = event.description;
-      if (event.blockedBy) item.blockedBySubjectKey = event.blockedBy;
+      if (event.blockedBy) item.blockedByCanonicalSubject = canonicalSubject(event.blockedBy);
       break;
     }
     case "cleared":
@@ -126,12 +133,18 @@ function applyEvent(items: Map<string, OperationalItem>, event: OperationalEvent
 }
 
 function toClaim(event: OperationalEvent): DispositionClaim {
-  return { eventId: event.id, value: event.claim!, occurredAt: event.occurredAt };
+  const raw = event.claim!;
+  return {
+    eventId: event.id,
+    value: raw,
+    canonicalValue: canonicalClaim(raw),
+    occurredAt: event.occurredAt,
+  };
 }
 
-/** Two different values for the same subject are contradictory. */
+/** Two different canonical concepts for the same subject are contradictory. */
 function isContradictory(claims: DispositionClaim[]): boolean {
-  return new Set(claims.map((c) => c.value)).size > 1;
+  return new Set(claims.map((c) => c.canonicalValue)).size > 1;
 }
 
 /** Status helper for callers that filter unresolved items. */
