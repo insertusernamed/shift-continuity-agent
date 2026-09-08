@@ -3,41 +3,41 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DeterministicEventInterpreter, type EventInterpreter } from "./interpreter.ts";
+import { DeterministicEventInterpreter, ProviderError, type EventInterpreter } from "./interpreter.ts";
 import { startServer } from "../http/server.ts";
 import { JsonFileShiftStore } from "../store/jsonFileStore.ts";
 
 describe("DeterministicEventInterpreter", () => {
   const interpreter = new DeterministicEventInterpreter();
 
-  it("parses the Phase 5 example sentence with causal context", () => {
-    const event = interpreter.interpret({ text: "Pallet 83 couldn't go out because aisle 7 is blocked." });
+  it("parses the Phase 5 example sentence with causal context", async () => {
+    const event = await interpreter.interpret({ text: "Pallet 83 couldn't go out because aisle 7 is blocked." });
     assert.equal(event.kind, "problem_reported");
     assert.equal(event.subject, "Pallet 83");
     assert.equal(event.blockedBy, "aisle 7");
   });
 
-  it("parses a cleared report", () => {
-    const event = interpreter.interpret({ text: "aisle 7 is cleared" });
+  it("parses a cleared report", async () => {
+    const event = await interpreter.interpret({ text: "aisle 7 is cleared" });
     assert.equal(event.kind, "cleared");
     assert.equal(event.subject, "aisle 7");
   });
 
-  it("parses a completion report", () => {
-    const event = interpreter.interpret({ text: "pallet 83 completed" });
+  it("parses a completion report", async () => {
+    const event = await interpreter.interpret({ text: "pallet 83 completed" });
     assert.equal(event.kind, "work_completed");
     assert.equal(event.subject, "pallet 83");
   });
 
-  it("parses a disposition claim", () => {
-    const event = interpreter.interpret({ text: "damaged case D104 should go to claims" });
+  it("parses a disposition claim", async () => {
+    const event = await interpreter.interpret({ text: "damaged case D104 should go to claims" });
     assert.equal(event.kind, "status_claimed");
     assert.equal(event.subject, "damaged case D104");
     assert.equal(event.claim, "send to claims");
   });
 
-  it("refuses to guess on unparseable input", () => {
-    assert.throws(
+  it("refuses to guess on unparseable input", async () => {
+    await assert.rejects(
       () => interpreter.interpret({ text: "the vibes are off today" }),
       (err: Error) => err.message.includes("could not interpret"),
     );
@@ -99,5 +99,43 @@ describe("NL ingestion endpoint", () => {
     const { shiftId } = await makeApp();
     const res = await api("POST", `/api/shifts/${shiftId}/events/nl`, { text: "   " });
     assert.equal(res.status, 400);
+  });
+
+  it("model result flows through the same deterministic engine path as manual entry", async () => {
+    const scripted: EventInterpreter = {
+      interpret: async () => ({ kind: "status_claimed", subject: "D104", description: "damaged, to claims", source: "llm", claim: "send to claims" }),
+    };
+    const { shiftId, store } = await makeApp(scripted);
+    const res = await api("POST", `/api/shifts/${shiftId}/events/nl`, { text: "case D104 is damaged, send it to claims", occurredAt: "2026-09-08T05:02:00Z" });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.source, "llm");
+    // Same store + same fold as manual entry: one item, claim attached.
+    const state = store.getShiftState(shiftId);
+    assert.equal(state?.items.length, 1);
+    assert.equal(state?.items[0]?.claims[0]?.value, "send to claims");
+    assert.equal(state?.items[0]?.canonicalSubject, "d104");
+  });
+
+  it("provider failure returns a controlled 502 and mutates nothing", async () => {
+    const failing: EventInterpreter = {
+      interpret: async () => {
+        throw new ProviderError("LLM provider failed: HTTP 503");
+      },
+    };
+    const { shiftId, store } = await makeApp(failing);
+    const res = await api("POST", `/api/shifts/${shiftId}/events/nl`, { text: "aisle 7 blocked" });
+    assert.equal(res.status, 502);
+    assert.match(res.body.error, /provider/i);
+    assert.equal(store.getEvents(shiftId).length, 0, "no event may be written on provider failure");
+  });
+
+  it("schema-invalid model output returns 400 and mutates nothing", async () => {
+    const hostile: EventInterpreter = {
+      interpret: async () => ({ kind: "everything_is_fine", subject: "", description: "" }) as unknown as EventInterpreter extends { interpret(r: never): Promise<infer T> } ? T : never,
+    };
+    const { shiftId, store } = await makeApp(hostile);
+    const res = await api("POST", `/api/shifts/${shiftId}/events/nl`, { text: "anything" });
+    assert.equal(res.status, 400);
+    assert.equal(store.getEvents(shiftId).length, 0);
   });
 });

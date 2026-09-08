@@ -11,11 +11,24 @@ export interface InterpretationRequest {
 }
 
 export interface EventInterpreter {
-  interpret(request: InterpretationRequest): InterpretedEvent;
+  interpret(request: InterpretationRequest): Promise<InterpretedEvent>;
 }
 
 /** InterpretedEvent mirrors OperationalEvent minus identity/timestamps. */
 export type InterpretedEvent = Omit<OperationalEvent, "id" | "shiftId" | "occurredAt">;
+
+/**
+ * Provider-neutral completion boundary: the LLM adapter depends on this,
+ * never on a vendor SDK (AGENTS.md §5). Any OpenAI-compatible endpoint is
+ * wrapped behind it, so tests inject deterministic fakes.
+ */
+export interface LlmCompletion {
+  text: string;
+}
+
+export interface LlmClient {
+  complete(prompt: string): Promise<LlmCompletion>;
+}
 
 /**
  * Rule-based interpreter: the always-available offline baseline. Matches
@@ -23,7 +36,7 @@ export type InterpretedEvent = Omit<OperationalEvent, "id" | "shiftId" | "occurr
  * unparseable fails loudly instead of guessing.
  */
 export class DeterministicEventInterpreter implements EventInterpreter {
-  interpret(request: InterpretationRequest): InterpretedEvent {
+  async interpret(request: InterpretationRequest): Promise<InterpretedEvent> {
     const text = request.text.trim();
 
     // Disposition claim: "damaged case D104 should go to claims" / "... was discarded"

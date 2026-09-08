@@ -62,6 +62,7 @@ export function renderUi(): string {
     <input id="nlText" placeholder="Pallet 83 couldn't go out because aisle 7 is blocked" style="flex:1">
     <button id="nlBtn">Add</button>
   </div>
+  <p id="nlResult" class="muted"></p>
   <p class="muted">Understood shapes: problems with/without cause, cleared, completed, dispositions ("case D104 should go to claims"). Anything else is refused, not guessed.</p>
   <h2>Add Event (structured)</h2>
   <form id="eventForm">
@@ -226,11 +227,14 @@ $("loadBtn").addEventListener("click", loadShift);
 
 $("nlBtn").addEventListener("click", async () => {
   showError("");
+  $("nlResult").textContent = "";
   try {
-    await api(\`/api/shifts/\${currentShift.id}/events/nl\`, {
+    const event = await api(\`/api/shifts/\${currentShift.id}/events/nl\`, {
       method: "POST",
       body: JSON.stringify({ text: $("nlText").value, occurredAt: new Date($("occurredAt").value).toISOString() }),
     });
+    // Show the structured event the interpreter derived (validated + persisted).
+    $("nlResult").textContent = \`Understood: \${event.kind} · \${event.subject}\${event.claim ? " — claim: " + event.claim : ""}\${event.blockedBy ? " — blocked by " + event.blockedBy : ""}\`;
     $("nlText").value = "";
     await loadShift();
   } catch (err) { showError(err.message); }

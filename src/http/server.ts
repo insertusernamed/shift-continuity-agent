@@ -5,7 +5,7 @@ import { StoreError } from "../store/jsonFileStore.ts";
 import { ValidationError } from "../domain/validate.ts";
 import { buildHandoff } from "../domain/handoff.ts";
 import { createDemoShift } from "../demo/demo.ts";
-import { DeterministicEventInterpreter, InterpretationError, type EventInterpreter } from "../ingest/interpreter.ts";
+import { DeterministicEventInterpreter, InterpretationError, ProviderError, type EventInterpreter } from "../ingest/interpreter.ts";
 import { renderUi } from "./ui.ts";
 
 export interface RunningServer {
@@ -144,7 +144,7 @@ async function handle(
     const text = typeof body.text === "string" ? body.text.trim() : "";
     if (!text) return sendJson(res, 400, { error: "text is required" });
     try {
-      const interpreted = interpreter.interpret({ text });
+      const interpreted = await interpreter.interpret({ text });
       const event = {
         ...interpreted,
         id: crypto.randomUUID(),
@@ -154,8 +154,13 @@ async function handle(
       store.appendEvent(event);
       sendJson(res, 201, event);
     } catch (err) {
-      // Both a failed interpretation and schema-invalid interpreter output
-      // are client errors; nothing is persisted in either case (§6).
+      // Provider/network failures upstream are 502: nothing was interpreted,
+      // so nothing can be persisted (§6). Schema-invalid interpreter output
+      // and unparseable reports are client errors; nothing is persisted in
+      // any failure case.
+      if (err instanceof ProviderError) {
+        return sendJson(res, 502, { error: err.message });
+      }
       if (err instanceof InterpretationError || err instanceof ValidationError) {
         return sendJson(res, 400, { error: err.message });
       }
