@@ -226,6 +226,71 @@ describe("HTTP API", () => {
     });
   });
 
+  describe("shift agent endpoint", () => {
+    async function makeAgentApp() {
+      const app = await makeApp();
+      const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "Night Shift" });
+      return { app, shiftId: shift.id as string };
+    }
+
+    it("routes a routine report through the agent and mutates deterministic state", async () => {
+      const { app, shiftId } = await makeAgentApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/agent`, { message: "Aisle 7 is blocked." });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.ok, true);
+        assert.match(res.body.response, /Aisle 7/i);
+        assert.deepEqual(res.body.toolTrace.map((t: any) => t.tool), ["report_event"]);
+
+        const state = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/state`);
+        const aisle = state.body.items.find((i: any) => i.canonicalSubject === "aisle 7");
+        assert.equal(aisle.status, "open", "agent must mutate state only through the deterministic path");
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("rejects a blank message and an unknown shift", async () => {
+      const { app, shiftId } = await makeAgentApp();
+      try {
+        const blank = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/agent`, { message: "   " });
+        assert.equal(blank.status, 400);
+
+        const unknown = await api(app.baseUrl, "POST", "/api/shifts/nope/agent", { message: "hello" });
+        assert.equal(unknown.status, 404);
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("refuses to decide a conflict autonomously but records an explicit human choice", async () => {
+      const { app, shiftId } = await makeAgentApp();
+      try {
+        await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/events`, {
+          occurredAt: "2026-09-08T05:02:00Z", kind: "status_claimed", subject: "damaged case D104", description: "send to claims", claim: "send to claims", source: "scanner",
+        });
+        await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/events`, {
+          occurredAt: "2026-09-08T05:14:00Z", kind: "status_claimed", subject: "damaged case D104", description: "discarded", claim: "discarded", source: "operator",
+        });
+
+        const vague = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/agent`, { message: "Just pick whichever one makes sense for D104." });
+        assert.equal(vague.status, 200);
+        assert.match(vague.body.response, /human decision is required/i);
+        assert.deepEqual(vague.body.toolTrace.map((t: any) => t.tool), ["get_shift_state"], "no decision tool may run without explicit human choice");
+
+        const explicit = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/agent`, { message: "Send D104 to claims." });
+        assert.equal(explicit.status, 200);
+        assert.equal(explicit.body.decision?.canonicalValue, "claims");
+
+        const state = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/state`);
+        const d104 = state.body.items.find((i: any) => i.canonicalSubject === "d104");
+        assert.equal(d104.status, "decided");
+      } finally {
+        app.cleanup();
+      }
+    });
+  });
+
   it("end-to-end: seed events, view state, end shift, get handoff", async () => {
     const app = await makeApp();
     try {

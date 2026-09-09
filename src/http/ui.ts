@@ -81,6 +81,17 @@ export function renderUi(): string {
   <button id="endBtn">End Shift</button>
 </section>
 
+<section id="agentSection" hidden>
+  <h2>Talk to Shift Agent</h2>
+  <div class="row">
+    <input id="agentText" placeholder="Aisle 7 is blocked. / What's left for morning shift?" style="flex:1">
+    <button id="agentBtn">Send</button>
+  </div>
+  <p id="agentReply"></p>
+  <p id="agentTrace" class="muted"></p>
+  <p class="muted">The agent chooses tools; the deterministic engine below owns the state. It will not decide conflicts for you.</p>
+</section>
+
 <section id="historySection" hidden>
   <h2>EVENT HISTORY</h2>
   <ul id="historyList"></ul>
@@ -137,6 +148,8 @@ async function loadShift() {
   $("shiftMeta").textContent = \`\${currentShift.name} — started \${fmt(currentShift.startedAt)}\${ended ? " — ended " + fmt(currentShift.endedAt) : ""}\`;
   $("eventSection").hidden = ended;
   $("endBtn").disabled = ended;
+
+  $("agentSection").hidden = ended;
 
   $("historySection").hidden = false;
   $("historyList").innerHTML = state.events
@@ -261,6 +274,26 @@ $("nlBtn").addEventListener("click", async () => {
     // Show the structured event the interpreter derived (validated + persisted).
     $("nlResult").textContent = \`Understood: \${event.kind} · \${event.subject}\${event.claim ? " — claim: " + event.claim : ""}\${event.blockedBy ? " — blocked by " + event.blockedBy : ""}\`;
     $("nlText").value = "";
+    await loadShift();
+  } catch (err) { showError(err.message); }
+});
+
+$("agentBtn").addEventListener("click", async () => {
+  showError("");
+  $("agentReply").textContent = "";
+  $("agentTrace").textContent = "";
+  const text = $("agentText").value.trim();
+  if (!text || !currentShift) return;
+  try {
+    const result = await api(\`/api/shifts/\${currentShift.id}/agent\`, {
+      method: "POST",
+      body: JSON.stringify({ message: text }),
+    });
+    $("agentReply").textContent = result.response || JSON.stringify(result);
+    $("agentTrace").textContent = (result.toolTrace || [])
+      .map((t) => \`Agent action: \${t.tool} → \${t.status === "success" ? "" : "ERROR: "}\${t.summary}\`)
+      .join(" | ");
+    $("agentText").value = "";
     await loadShift();
   } catch (err) { showError(err.message); }
 });

@@ -8,6 +8,8 @@ import { recordableDecision, DecisionValidationError } from "../domain/decide.ts
 import { canonicalSubject } from "../domain/subjects.ts";
 import { createDemoShift } from "../demo/demo.ts";
 import { DeterministicEventInterpreter, InterpretationError, ProviderError, type EventInterpreter } from "../ingest/interpreter.ts";
+import { ingestNaturalLanguageReport } from "../ingest/ingestEvent.ts";
+import { createShiftContinuityAgent, type BedrockAgentConfig } from "../agent/shiftContinuityAgent.ts";
 import { renderUi } from "./ui.ts";
 
 export interface RunningServer {
@@ -28,12 +30,14 @@ export function startServer(options: {
   port?: number;
   /** Natural-language interpreter; injectable so tests never call an LLM. */
   interpreter?: EventInterpreter;
+  /** Bedrock configuration for the Strands agent; omitted = offline deterministic agent. */
+  bedrock?: BedrockAgentConfig;
 }): Promise<RunningServer> {
   const { store } = options;
   const interpreter = options.interpreter ?? new DeterministicEventInterpreter();
   const nodeServer = createServer((req, res) => {
-    handle(req, res, store, interpreter).catch((err) => {
-      sendJson(res, 500, { error: "internal error" });
+    handle(req, res, store, interpreter, options.bedrock).catch((err) => {
+      if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
       // Surface unexpected failures loudly; never swallow them silently.
       console.error(err);
     });
@@ -57,6 +61,7 @@ async function handle(
   res: ServerResponse,
   store: ShiftStore,
   interpreter: EventInterpreter,
+  bedrock?: BedrockAgentConfig,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const parts = url.pathname.split("/").filter(Boolean);
@@ -174,6 +179,25 @@ async function handle(
         return sendJson(res, 400, { error: err.message });
       }
       sendDomainError(res, err);
+    }
+    return;
+  }
+
+  // POST /api/shifts/:id/agent — Strands orchestration over deterministic tools.
+  if (sub === "agent" && method === "POST") {
+    if (!store.getShift(shiftId)) return sendJson(res, 404, { error: "unknown shift" });
+    const body = await readJson(req, res);
+    if (body === undefined) return;
+    const message = typeof body.message === "string" ? body.message.trim() : "";
+    if (!message) return sendJson(res, 400, { error: "message is required" });
+    try {
+      const agent = createShiftContinuityAgent({ store, shiftId, interpreter, mode: bedrock ? "bedrock" : "deterministic", bedrock });
+      const result = await agent.invoke(message);
+      sendJson(res, result.ok ? 200 : 502, result);
+    } catch (err) {
+      // Agent construction/loop failures are upstream-of-tool: controlled 502,
+      // and nothing was appended because tools own all mutation.
+      sendJson(res, 502, { error: err instanceof Error ? err.message : String(err) });
     }
     return;
   }

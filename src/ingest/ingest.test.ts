@@ -17,6 +17,18 @@ describe("DeterministicEventInterpreter", () => {
     assert.equal(event.blockedBy, "aisle 7");
   });
 
+  it("parses a simple blocked report", async () => {
+    const event = await interpreter.interpret({ text: "Aisle 7 is blocked." });
+    assert.equal(event.kind, "problem_reported");
+    assert.equal(event.subject, "Aisle 7");
+  });
+
+  it("parses a clear report", async () => {
+    const event = await interpreter.interpret({ text: "Aisle 7 is clear now." });
+    assert.equal(event.kind, "cleared");
+    assert.equal(event.subject, "Aisle 7");
+  });
+
   it("parses a cleared report", async () => {
     const event = await interpreter.interpret({ text: "aisle 7 is cleared" });
     assert.equal(event.kind, "cleared");

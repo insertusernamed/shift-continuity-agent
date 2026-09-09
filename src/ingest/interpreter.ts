@@ -66,7 +66,17 @@ export class DeterministicEventInterpreter implements EventInterpreter {
       };
     }
 
-    if (/\b(cleared|unblocked|open again)\b/i.test(text)) {
+    const blocked = text.match(/^(.+?)\s+(?:is|are|was)\s+blocked\.?$/i);
+    if (blocked) {
+      return {
+        kind: "problem_reported",
+        subject: blocked[1]!.trim(),
+        description: text,
+        source: "nl-ingest",
+      };
+    }
+
+    if (/\b(clear|cleared|unblocked|open again)\b/i.test(text)) {
       return {
         kind: "cleared",
         subject: stripResolutionPhrases(text),
@@ -91,8 +101,10 @@ export class DeterministicEventInterpreter implements EventInterpreter {
 /** "aisle 7 is cleared" -> "aisle 7"; "pallet 83 completed" -> "pallet 83". */
 function stripResolutionPhrases(s: string): string {
   return s
-    .replace(/\b(is|are|was|now)\b/gi, " ")
-    .replace(/\b(cleared|unblocked|open again|completed|done|finished)\b/gi, " ")
+    // Trailing sentence punctuation is not part of the subject.
+    .replace(/[.!?]+$/g, "")
+    .replace(/\b(is|are|was|now)\b/gi, "")
+    .replace(/\b(clear|cleared|unblocked|open again|completed|done|finished)\b/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }
