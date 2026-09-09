@@ -15,7 +15,11 @@ import { renderUi } from "./ui.ts";
 export interface RunningServer {
   url: string;
   port: number;
-  close(): void;
+  /**
+   * Resolves only after shutdown completes, including idle keep-alive socket
+   * teardown, so restart harnesses can rebind the same port without racing.
+   */
+  close(): Promise<void>;
 }
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -43,6 +47,8 @@ export function startServer(options: {
     });
   });
 
+  let shutdown: Promise<void> | undefined;
+
   return new Promise<RunningServer>((resolve) => {
     nodeServer.listen(options.port ?? 0, "127.0.0.1", () => {
       const address = nodeServer.address();
@@ -50,7 +56,15 @@ export function startServer(options: {
       resolve({
         port,
         url: `http://127.0.0.1:${port}`,
-        close: () => nodeServer.close(),
+        close: () => {
+          // Idempotent: double-close (test hooks, harness + finally) returns
+          // the same shutdown; ERR_SERVER_NOT_RUNNING never escapes.
+          shutdown ??= new Promise<void>((resolveClose) => {
+            nodeServer.closeIdleConnections();
+            nodeServer.close(() => resolveClose());
+          });
+          return shutdown;
+        },
       });
     });
   });

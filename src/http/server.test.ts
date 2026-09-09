@@ -92,6 +92,25 @@ describe("HTTP API", () => {
     }
   });
 
+  it("regression: close() resolves only after full shutdown, so the port can be rebound immediately", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "shift-close-"));
+    try {
+      const store = new JsonFileShiftStore(join(dir, "shifts.json"));
+      const first = await startServer({ store, port: 0 });
+      const closePromise = first.close();
+      assert.ok(closePromise instanceof Promise, "close() must return a promise the smoke harness can await");
+      await closePromise;
+
+      // Immediate rebind on the same port: only safe if close() fully released it.
+      const second = await startServer({ store, port: first.port });
+      server = second;
+      const res = await fetch(second.url + "/api/shifts");
+      assert.equal(res.status, 200);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("regression: POST /api/demo-shift seeds the demo scenario (guard must not 404 it)", async () => {
     const app = await makeApp();
     try {

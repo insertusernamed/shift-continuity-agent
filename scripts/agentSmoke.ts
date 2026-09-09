@@ -1,14 +1,23 @@
 /** Offline smoke: boots the real server in-process (no AWS), exercises the agent path, prints results. */
 import { rmSync } from "node:fs";
 import { startServer } from "../src/http/server.ts";
+import { awaitReadiness } from "../src/http/readiness.ts";
 import { JsonFileShiftStore } from "../src/store/jsonFileStore.ts";
+
+// Bedrock mode is opt-in exactly like src/main.ts: BEDROCK_AGENT=1 + the
+// normal AWS environment (profile, region, BEDROCK_MODEL_ID). Unset = the
+// offline deterministic agent; no AWS call ever happens.
+const bedrock = process.env.BEDROCK_AGENT === "1" ? {} : undefined;
 
 const DATA_FILE = "/tmp/shift-agent-smoke.json";
 try { rmSync(DATA_FILE, { force: true }); } catch {}
 
 const store = new JsonFileShiftStore(DATA_FILE);
-const server = await startServer({ store, port: 7791 });
+const server = await startServer({ store, port: 7791, bedrock });
+// Hoisted so the finally block can close it even on mid-run failure.
+let server2: Awaited<ReturnType<typeof startServer>> | undefined;
 const base = server.url;
+console.log(`Agent mode: ${bedrock ? `Bedrock (${process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "region from AWS env"}, ${process.env.BEDROCK_MODEL_ID ?? "ca.amazon.nova-lite-v1:0"})` : "offline deterministic"}`);
 
 async function api(method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
   const res = await fetch(base + path, {
@@ -78,10 +87,14 @@ try {
   const beforeCount = eventsAfter.body.length;
   check("failed report mutated nothing", nonsense.status === 502 && (await api("GET", `/api/shifts/${shiftId}/events`)).body.length === beforeCount);
 
-  // Restart persistence.
-  server.close();
+  // Restart persistence. close() fully releases the port (including idle
+  // keep-alive sockets), and the readiness poll confirms the new instance is
+  // answering before any product request — connection errors are tolerated
+  // ONLY inside that poll, never around real requests.
+  await server.close();
   const store2 = new JsonFileShiftStore(DATA_FILE);
-  const server2 = await startServer({ store: store2, port: 7791 });
+  server2 = await startServer({ store: store2, port: 7791, bedrock });
+  await awaitReadiness({ url: server2.url, timeoutMs: 10_000, pollMs: 100 });
   const state5 = await api("GET", `/api/shifts/${shiftId}/state`);
   const d104c = state5.body.items.find((i: any) => i.canonicalSubject === "d104");
   check("decision survives restart", d104c?.status === "decided");
@@ -92,7 +105,7 @@ try {
   const nl = await api("POST", `/api/shifts/${nlShift.id}/events/nl`, { text: "Pallet 83 couldn't go out because aisle 7 is blocked." });
   check("deterministic NL ingestion still works", nl.status === 201 && nl.body.blockedBy === "aisle 7");
 
-  server2.close();
 } finally {
-  server.close();
+  await server2?.close();
+  await server.close();
 }
