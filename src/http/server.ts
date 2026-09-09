@@ -4,6 +4,8 @@ import type { ShiftStore } from "../store/jsonFileStore.ts";
 import { StoreError } from "../store/jsonFileStore.ts";
 import { ValidationError } from "../domain/validate.ts";
 import { buildHandoff } from "../domain/handoff.ts";
+import { recordableDecision, DecisionValidationError } from "../domain/decide.ts";
+import { canonicalSubject } from "../domain/subjects.ts";
 import { createDemoShift } from "../demo/demo.ts";
 import { DeterministicEventInterpreter, InterpretationError, ProviderError, type EventInterpreter } from "../ingest/interpreter.ts";
 import { renderUi } from "./ui.ts";
@@ -114,6 +116,13 @@ async function handle(
     if (method === "POST") {
       const body = await readJson(req, res);
       if (body === undefined) return;
+      if (body.kind === "decision_recorded") {
+        // Decisions are gated: they must pass the human-review validation
+        // endpoint, not arrive as raw events (§7 — no silent state mutation).
+        return sendJson(res, 400, {
+          error: "decision_recorded events must go through POST /api/shifts/:id/items/:subject/decision",
+        });
+      }
       try {
         // The HTTP body is untrusted input; validateEvent at the store
         // boundary is the schema gate (§6) before anything persists.
@@ -190,6 +199,45 @@ async function handle(
     try {
       sendJson(res, 200, store.endShift(shiftId));
     } catch (err) {
+      sendDomainError(res, err);
+    }
+    return;
+  }
+
+  // POST /api/shifts/:id/items/:subject/decision — a human reconciles a
+  // conflicted item. The decision is validated against the current folded
+  // state, then appended as an ordinary decision_recorded event through the
+  // normal store path; state is re-derived from events, never written directly.
+  if (sub === "items" && parts[5] === "decision" && method === "POST") {
+    const subject = decodeURIComponent(parts[4] ?? "");
+    const body = await readJson(req, res);
+    if (body === undefined) return;
+    if (typeof body.claim !== "string" || !body.claim.trim()) {
+      return sendJson(res, 400, { error: 'decision body must include a non-empty "claim"' });
+    }
+    const state = store.getShiftState(shiftId);
+    if (!state) return sendJson(res, 404, { error: "unknown shift" });
+    try {
+      const decision = recordableDecision({
+        state,
+        subject,
+        claim: body.claim,
+        eventId: crypto.randomUUID(),
+        occurredAt: new Date().toISOString(),
+      });
+      store.appendEvent(decision);
+      const updated = store.getShiftState(shiftId);
+      const item = updated?.items.find((i) => i.canonicalSubject === canonicalSubject(subject));
+      sendJson(res, 200, { event: decision, item });
+    } catch (err) {
+      if (err instanceof DecisionValidationError) {
+        const status =
+          err.code === "item_not_found" ? 404
+          : err.code === "item_not_conflicted" || err.code === "already_decided" ? 409
+          : 400;
+        return sendJson(res, status, { error: err.message, code: err.code });
+      }
+      // Includes StoreError "shift has ended" → 409 via the shared mapping.
       sendDomainError(res, err);
     }
     return;

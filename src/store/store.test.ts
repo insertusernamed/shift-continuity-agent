@@ -108,4 +108,22 @@ describe("JsonFileShiftStore", () => {
     const names = store.listShifts().map((s) => s.name);
     assert.deepEqual(names, ["Day Shift", "Night Shift"]);
   });
+
+  it("a recorded human decision survives restart with its full history", () => {
+    const first = new JsonFileShiftStore(file);
+    const shift = first.createShift("Night Shift");
+    first.appendEvent(makeEvent(shift.id, { occurredAt: "2026-09-08T05:02:00Z", kind: "status_claimed", subject: "damaged case D104", description: "claims", claim: "send to claims", source: "scanner" }));
+    first.appendEvent(makeEvent(shift.id, { occurredAt: "2026-09-08T05:14:00Z", kind: "status_claimed", subject: "damaged case D104", description: "discarded", claim: "discarded", source: "operator" }));
+    first.appendEvent(makeEvent(shift.id, { occurredAt: "2026-09-08T05:40:00Z", kind: "decision_recorded", subject: "damaged case D104", description: "human decision", claim: "send to claims", source: "human" }));
+
+    // Simulate an application restart: a brand-new store over the same file.
+    const second = new JsonFileShiftStore(file);
+    const state = second.getShiftState(shift.id);
+    assert.ok(state);
+    const d104 = state.items.find((i) => i.canonicalSubject === "d104");
+    assert.ok(d104);
+    assert.equal(d104.status, "decided");
+    assert.equal(d104.decision?.canonicalValue, "claims");
+    assert.equal(state.events.length, 3, "both claims and the decision remain in history");
+  });
 });

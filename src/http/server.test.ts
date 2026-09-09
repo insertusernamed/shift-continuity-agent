@@ -115,6 +115,117 @@ describe("HTTP API", () => {
     }
   });
 
+  describe("human decision endpoint", () => {
+    async function makeConflictedApp() {
+      const app = await makeApp();
+      const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "Night Shift" });
+      await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events`, {
+        occurredAt: "2026-09-08T04:46:00Z", kind: "problem_reported", subject: "freezer inspection", description: "missed", source: "radio",
+      });
+      await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events`, {
+        occurredAt: "2026-09-08T05:02:00Z", kind: "status_claimed", subject: "damaged case D104", description: "send to claims", claim: "send to claims", source: "scanner",
+      });
+      await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events`, {
+        occurredAt: "2026-09-08T05:14:00Z", kind: "status_claimed", subject: "damaged case D104", description: "discarded", claim: "discarded", source: "operator",
+      });
+      return { app, shiftId: shift.id as string };
+    }
+
+    it("records a valid decision: item becomes decided and leaves human review", async () => {
+      const { app, shiftId } = await makeConflictedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/d104/decision`, { claim: "send to claims" });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.item.status, "decided");
+        assert.equal(res.body.item.decision.canonicalValue, "claims");
+
+        const handoff = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/handoff`);
+        assert.equal(handoff.body.requiresHumanReview.length, 0);
+        assert.equal(handoff.body.decidedDuringShiftCount, 1);
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("404 for an unknown item", async () => {
+      const { app, shiftId } = await makeConflictedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/pallet-99/decision`, { claim: "claims" });
+        assert.equal(res.status, 404);
+        assert.match(res.body.error, /no operational item/i);
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("409 when the item is not conflicted", async () => {
+      const { app, shiftId } = await makeConflictedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/${encodeURIComponent("freezer inspection")}/decision`, { claim: "claims" });
+        assert.equal(res.status, 409);
+        assert.match(res.body.error, /not conflicted/i);
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("400 for a claim outside the conflicting options", async () => {
+      const { app, shiftId } = await makeConflictedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/d104/decision`, { claim: "donate" });
+        assert.equal(res.status, 400);
+        assert.match(res.body.error, /donate/i);
+
+        const state = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/state`);
+        const d104 = state.body.items.find((i: any) => i.canonicalSubject === "d104");
+        assert.equal(d104.status, "conflicted", "rejected decision must not mutate state");
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("400 for a malformed body (missing claim)", async () => {
+      const { app, shiftId } = await makeConflictedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/d104/decision`, {});
+        assert.equal(res.status, 400);
+        assert.match(res.body.error, /claim/i);
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("409 for a second decision after the item is already decided", async () => {
+      const { app, shiftId } = await makeConflictedApp();
+      try {
+        const first = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/d104/decision`, { claim: "claims" });
+        assert.equal(first.status, 200);
+        const second = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/d104/decision`, { claim: "discard" });
+        assert.equal(second.status, 409);
+        assert.match(second.body.error, /already/i);
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("regression: decision_recorded cannot be smuggled through the generic event endpoint", async () => {
+      const { app, shiftId } = await makeConflictedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/events`, {
+          occurredAt: "2026-09-08T05:40:00Z", kind: "decision_recorded", subject: "damaged case D104", description: "bypass attempt", claim: "send to claims", source: "operator",
+        });
+        assert.equal(res.status, 400);
+        assert.match(res.body.error, /decision_recorded/i);
+
+        const state = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/state`);
+        const d104 = state.body.items.find((i: any) => i.canonicalSubject === "d104");
+        assert.equal(d104.status, "conflicted", "state must be unchanged");
+      } finally {
+        app.cleanup();
+      }
+    });
+  });
+
   it("end-to-end: seed events, view state, end shift, get handoff", async () => {
     const app = await makeApp();
     try {
