@@ -119,14 +119,19 @@ function applyEvent(items: Map<string, OperationalItem>, event: OperationalEvent
     }
     case "status_claimed": {
       item.claims.push(toClaim(event));
-      if (isContradictory(item.claims)) {
+      // A decision is sticky: late contradictory reports are kept for audit
+      // but cannot reopen a human-settled item (human-review-loop milestone).
+      if (item.status !== "decided" && isContradictory(item.claims)) {
         item.status = "conflicted";
       }
       break;
     }
     case "decision_recorded": {
-      item.decision = toClaim(event);
-      item.status = "decided";
+      // First decision wins; later decision events remain in history only.
+      if (item.status !== "decided") {
+        item.decision = toClaim(event);
+        item.status = "decided";
+      }
       break;
     }
   }
