@@ -9,6 +9,8 @@ import { canonicalSubject } from "../domain/subjects.ts";
 import { createDemoShift } from "../demo/demo.ts";
 import { DeterministicEventInterpreter, InterpretationError, ProviderError, type EventInterpreter } from "../ingest/interpreter.ts";
 import { ingestNaturalLanguageReport } from "../ingest/ingestEvent.ts";
+import { ingestPhotoEvidence, PhotoEvidenceError } from "../ingest/ingestPhotoEvidence.ts";
+import type { EvidenceStore } from "../store/evidenceStore.ts";
 import { createShiftContinuityAgent, type BedrockAgentConfig } from "../agent/shiftContinuityAgent.ts";
 import { renderUi } from "./ui.ts";
 
@@ -22,7 +24,11 @@ export interface RunningServer {
   close(): Promise<void>;
 }
 
-const MAX_BODY_BYTES = 1024 * 1024;
+// Base64 inflates an image by ~4/3, so the body limit has to clear the image
+// limit with headroom. Both stay small: evidence is a demo feature, not a
+// media pipeline.
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 /**
  * Plain node:http server. Deliberately framework-free (AGENTS.md §5/§9):
@@ -36,11 +42,13 @@ export function startServer(options: {
   interpreter?: EventInterpreter;
   /** Bedrock configuration for the Strands agent; omitted = offline deterministic agent. */
   bedrock?: BedrockAgentConfig;
+  /** Photo-evidence byte storage; omitted = photo reports are refused, text still works. */
+  evidenceStore?: EvidenceStore;
 }): Promise<RunningServer> {
   const { store } = options;
   const interpreter = options.interpreter ?? new DeterministicEventInterpreter();
   const nodeServer = createServer((req, res) => {
-    handle(req, res, store, interpreter, options.bedrock).catch((err) => {
+    handle(req, res, store, interpreter, options.bedrock, options.evidenceStore).catch((err) => {
       if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
       // Surface unexpected failures loudly; never swallow them silently.
       console.error(err);
@@ -76,6 +84,7 @@ async function handle(
   store: ShiftStore,
   interpreter: EventInterpreter,
   bedrock?: BedrockAgentConfig,
+  evidenceStore?: EvidenceStore,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const parts = url.pathname.split("/").filter(Boolean);
@@ -197,6 +206,82 @@ async function handle(
     return;
   }
 
+  // POST /api/shifts/:id/events/photo — photo + note → interpreted event with
+  // the image preserved as evidence metadata. The image never reaches the
+  // interpreter: the note is interpreted exactly like a text report, so photo
+  // reports go through the same validation gate as everything else.
+  if (sub === "events" && parts[4] === "photo" && method === "POST") {
+    if (!store.getShift(shiftId)) return sendJson(res, 404, { error: "unknown shift" });
+    if (!evidenceStore) return sendJson(res, 501, { error: "photo evidence storage is not configured" });
+    const body = await readJson(req, res);
+    if (body === undefined) return;
+
+    const rawImage = typeof body.image === "string" ? body.image : "";
+    if (!rawImage.trim()) return sendJson(res, 400, { error: "image is required (base64 or data URL)" });
+    let image: { bytes: Buffer; contentType?: string };
+    try {
+      image = decodeImageField(rawImage);
+    } catch (err) {
+      return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+    if (image.bytes.length > MAX_IMAGE_BYTES) {
+      return sendJson(res, 413, { error: `image exceeds ${MAX_IMAGE_BYTES} bytes` });
+    }
+    const declaredType = typeof body.contentType === "string" ? body.contentType.trim() : "";
+    const contentType = declaredType || image.contentType || "";
+    if (!contentType) {
+      return sendJson(res, 400, { error: "contentType is required when the image is not a data URL" });
+    }
+
+    try {
+      const event = await ingestPhotoEvidence({
+        store,
+        evidenceStore,
+        shiftId,
+        interpreter,
+        note: typeof body.note === "string" ? body.note : "",
+        image: image.bytes,
+        contentType,
+        fileName: typeof body.fileName === "string" ? body.fileName : "",
+        ...(typeof body.occurredAt === "string" && body.occurredAt ? { occurredAt: body.occurredAt } : {}),
+      });
+      sendJson(res, 201, event);
+    } catch (err) {
+      if (err instanceof ProviderError) return sendJson(res, 502, { error: err.message });
+      if (
+        err instanceof PhotoEvidenceError ||
+        err instanceof InterpretationError ||
+        err instanceof ValidationError
+      ) {
+        return sendJson(res, 400, { error: err.message });
+      }
+      sendDomainError(res, err);
+    }
+    return;
+  }
+
+  // GET /api/shifts/:id/evidence/:evidenceId — the stored image bytes. Metadata
+  // (content type) comes from the event, so history stays the source of truth.
+  if (sub === "evidence" && parts[4] !== undefined && method === "GET") {
+    if (!evidenceStore) return sendJson(res, 501, { error: "photo evidence storage is not configured" });
+    const state = store.getShiftState(shiftId);
+    if (!state) return sendJson(res, 404, { error: "unknown shift" });
+    const evidenceId = decodeURIComponent(parts[4]);
+    const attachment = state.events
+      .flatMap((e) => e.evidence ?? [])
+      .find((ev) => ev.id === evidenceId);
+    if (!attachment) return sendJson(res, 404, { error: "unknown evidence" });
+    const bytes = evidenceStore.read(evidenceId);
+    if (!bytes) return sendJson(res, 404, { error: "evidence file is missing" });
+    res.writeHead(200, {
+      "content-type": attachment.contentType,
+      "content-length": bytes.length,
+      "cache-control": "private, max-age=3600",
+    });
+    res.end(bytes);
+    return;
+  }
+
   // POST /api/shifts/:id/agent — Strands orchestration over deterministic tools.
   if (sub === "agent" && method === "POST") {
     if (!store.getShift(shiftId)) return sendJson(res, 404, { error: "unknown shift" });
@@ -295,6 +380,22 @@ function sendDomainError(res: ServerResponse, err: unknown): void {
     return;
   }
   throw err;
+}
+
+/**
+ * Browsers hand us a data URL from FileReader; the API also accepts bare
+ * base64. Everything else (empty, non-base64, zero bytes) is refused here so
+ * nothing downstream has to guess what the image was.
+ */
+function decodeImageField(raw: string): { bytes: Buffer; contentType?: string } {
+  const dataUrl = raw.match(/^data:([^;,]+);base64,(.*)$/s);
+  const base64 = (dataUrl ? dataUrl[2]! : raw).replace(/\s/g, "");
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
+    throw new Error("image must be base64 or a base64 data URL");
+  }
+  const bytes = Buffer.from(base64, "base64");
+  if (bytes.length === 0) throw new Error("image decoded to zero bytes");
+  return dataUrl ? { bytes, contentType: dataUrl[1]! } : { bytes };
 }
 
 async function readJson(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> {

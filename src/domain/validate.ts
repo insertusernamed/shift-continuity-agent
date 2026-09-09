@@ -1,4 +1,4 @@
-import type { OperationalEvent, EventKind } from "./types.ts";
+import type { EvidenceAttachment, OperationalEvent, EventKind } from "./types.ts";
 import { canonicalSubject } from "./subjects.ts";
 
 const EVENT_KINDS: readonly EventKind[] = [
@@ -56,6 +56,16 @@ export function validateEvent(candidate: unknown): OperationalEvent {
     }
   }
 
+  // Photo evidence metadata is schema-checked here like any other field: the
+  // bytes are stored outside the event, but what the event claims about them
+  // must be well-formed before it becomes history.
+  if ("evidence" in e && e.evidence !== undefined) {
+    if (!Array.isArray(e.evidence) || e.evidence.length === 0) {
+      throw new ValidationError('event field "evidence" must be a non-empty array when present');
+    }
+    for (const item of e.evidence) validateEvidence(item);
+  }
+
   // blockedBy is causal context only; canonicalize it so links survive
   // phrasing ("aisle 7" and "blocked aisle 7" refer to the same subject).
   const normalized: OperationalEvent = { ...event, occurredAt: normalizeIso(event.occurredAt) };
@@ -65,6 +75,25 @@ export function validateEvent(candidate: unknown): OperationalEvent {
     delete normalized.blockedBy;
   }
   return normalized;
+}
+
+function validateEvidence(candidate: unknown): asserts candidate is EvidenceAttachment {
+  if (typeof candidate !== "object" || candidate === null) {
+    throw new ValidationError('evidence must be an object with "id", "fileName", and "contentType"');
+  }
+  const e = candidate as Record<string, unknown>;
+  for (const field of ["id", "fileName", "contentType"] as const) {
+    if (!isNonEmptyString(e[field])) {
+      throw new ValidationError(`evidence field "${field}" must be a non-empty string`);
+    }
+  }
+  if (!(e.contentType as string).startsWith("image/")) {
+    throw new ValidationError(`evidence "contentType" must be an image type, got "${String(e.contentType)}"`);
+  }
+  // Present-but-blank notes fail loudly rather than being silently dropped.
+  if ("note" in e && e.note !== undefined && !isNonEmptyString(e.note)) {
+    throw new ValidationError('evidence "note" must be a non-empty string when present');
+  }
 }
 
 export class ValidationError extends Error {}

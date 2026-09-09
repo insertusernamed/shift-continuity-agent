@@ -31,6 +31,21 @@ export type ItemCategory =
   /** An asserted value about a subject (e.g. disposition of damaged goods). */
   | "disposition";
 
+/**
+ * Photo evidence attached to a report (submission-prep milestone). The bytes
+ * live in local storage keyed by id; only metadata is part of the event, so
+ * the append-only log stays small and the fold stays deterministic.
+ */
+export interface EvidenceAttachment {
+  id: string;
+  /** Original file name as supplied by the reporter (display only). */
+  fileName: string;
+  /** MIME type; images only — evidence is photographic by definition here. */
+  contentType: string;
+  /** Short human note captured with the photo. */
+  note?: string;
+}
+
 /** Something reported during a shift. The append-only source of truth. */
 export interface OperationalEvent {
   id: string;
@@ -47,6 +62,8 @@ export interface OperationalEvent {
   claim?: string;
   /** Optional causal context: the subject that caused this problem, e.g. pallet blocked because "aisle 7" is blocked. Explanatory only — never auto-resolves anything. */
   blockedBy?: string;
+  /** Optional photo evidence attached to this report (see EvidenceAttachment). */
+  evidence?: EvidenceAttachment[];
 }
 
 /** One asserted value attached to a disposition item. */

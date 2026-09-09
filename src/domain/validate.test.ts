@@ -61,3 +61,27 @@ describe("event validation", () => {
     assert.equal(validated.blockedBy, "d104");
   });
 });
+
+describe("photo evidence validation", () => {
+  const photo = { id: "ev-1", fileName: "d104.png", contentType: "image/png", note: "D104 was crushed" };
+
+  it("accepts image evidence metadata on an event", () => {
+    const validated = validateEvent({ ...base, evidence: [photo] });
+    assert.deepEqual(validated.evidence, [photo]);
+  });
+
+  it("treats absent evidence as absent, not empty", () => {
+    assert.equal("evidence" in validateEvent(base), false);
+  });
+
+  it("rejects evidence whose content type is not an image", () => {
+    rejectsWith({ ...base, evidence: [{ ...photo, contentType: "application/pdf" }] }, "contentType");
+  });
+
+  it("rejects malformed evidence entries", () => {
+    rejectsWith({ ...base, evidence: "d104.png" }, "evidence");
+    rejectsWith({ ...base, evidence: [{ ...photo, id: "" }] }, "id");
+    rejectsWith({ ...base, evidence: [{ ...photo, fileName: "" }] }, "fileName");
+    rejectsWith({ ...base, evidence: [{ ...photo, note: "" }] }, "note");
+  });
+});

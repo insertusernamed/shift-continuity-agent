@@ -1,10 +1,11 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer } from "./server.ts";
 import { JsonFileShiftStore } from "../store/jsonFileStore.ts";
+import { FileEvidenceStore } from "../store/evidenceStore.ts";
 
 let server: Awaited<ReturnType<typeof startServer>> | undefined;
 
@@ -16,9 +17,11 @@ afterEach(() => {
 async function makeApp() {
   const dir = mkdtempSync(join(tmpdir(), "shift-api-"));
   const store = new JsonFileShiftStore(join(dir, "shifts.json"));
-  server = await startServer({ store, port: 0 });
+  const evidenceDir = join(dir, "evidence");
+  server = await startServer({ store, port: 0, evidenceStore: new FileEvidenceStore(evidenceDir) });
   return {
     baseUrl: server.url,
+    evidenceDir,
     cleanup: () => {
       server?.close();
       rmSync(dir, { recursive: true, force: true });
@@ -348,6 +351,116 @@ describe("HTTP API", () => {
         source: "radio",
       });
       assert.equal(blocked.status, 409);
+    } finally {
+      app.cleanup();
+    }
+  });
+});
+
+// Submission-prep milestone: photo evidence rides the same pipeline as text,
+// so these tests pin the storage/serving boundary and the rejection paths.
+describe("photo evidence API", () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  it("stores a photo, attaches it to the interpreted event, and serves it back", async () => {
+    const app = await makeApp();
+    try {
+      const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "S" });
+      const res = await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events/photo`, {
+        note: "Aisle 7 is blocked.",
+        image: PNG.toString("base64"),
+        contentType: "image/png",
+        fileName: "aisle7.png",
+        occurredAt: "2026-09-08T02:11:00Z",
+      });
+      assert.equal(res.status, 201);
+      assert.equal(res.body.kind, "problem_reported");
+      assert.equal(res.body.subject, "Aisle 7");
+      assert.equal(res.body.source, "photo-ingest");
+      assert.equal(res.body.evidence.length, 1);
+      assert.equal(res.body.evidence[0].fileName, "aisle7.png");
+      assert.equal(res.body.evidence[0].note, "Aisle 7 is blocked.");
+
+      // The evidence is part of history, and the state fold picked the event up.
+      const state = await api(app.baseUrl, "GET", `/api/shifts/${shift.id}/state`);
+      assert.equal(state.body.events.length, 1);
+      assert.equal(state.body.items[0].status, "open");
+
+      const img = await fetch(`${app.baseUrl}/api/shifts/${shift.id}/evidence/${res.body.evidence[0].id}`);
+      assert.equal(img.status, 200);
+      assert.equal(img.headers.get("content-type"), "image/png");
+      assert.deepEqual(Buffer.from(await img.arrayBuffer()), PNG);
+    } finally {
+      app.cleanup();
+    }
+  });
+
+  it("accepts a data-URL image, which is what a browser file input gives us", async () => {
+    const app = await makeApp();
+    try {
+      const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "S" });
+      const res = await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events/photo`, {
+        note: "Aisle 7 is blocked.",
+        image: `data:image/png;base64,${PNG.toString("base64")}`,
+        contentType: "image/png",
+        fileName: "aisle7.png",
+      });
+      assert.equal(res.status, 201);
+    } finally {
+      app.cleanup();
+    }
+  });
+
+  // An uninterpretable note must not create an event *or* leave bytes behind.
+  it("rejects an uninterpretable note with nothing persisted and nothing stored", async () => {
+    const app = await makeApp();
+    try {
+      const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "S" });
+      const res = await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events/photo`, {
+        note: "the vibes are off today",
+        image: PNG.toString("base64"),
+        contentType: "image/png",
+        fileName: "vibes.png",
+      });
+      assert.equal(res.status, 400);
+      const events = await api(app.baseUrl, "GET", `/api/shifts/${shift.id}/events`);
+      assert.deepEqual(events.body, []);
+      assert.deepEqual(existsSync(app.evidenceDir) ? readdirSync(app.evidenceDir) : [], []);
+    } finally {
+      app.cleanup();
+    }
+  });
+
+  it("rejects a non-image attachment and a missing note", async () => {
+    const app = await makeApp();
+    try {
+      const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "S" });
+      for (const body of [
+        { note: "Aisle 7 is blocked.", image: PNG.toString("base64"), contentType: "application/pdf", fileName: "x.pdf" },
+        { note: "   ", image: PNG.toString("base64"), contentType: "image/png", fileName: "x.png" },
+        { note: "Aisle 7 is blocked.", image: "", contentType: "image/png", fileName: "x.png" },
+      ]) {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events/photo`, body);
+        assert.equal(res.status, 400, JSON.stringify(body));
+      }
+    } finally {
+      app.cleanup();
+    }
+  });
+
+  it("404s for unknown evidence and for an unknown shift", async () => {
+    const app = await makeApp();
+    try {
+      const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "S" });
+      const missing = await fetch(`${app.baseUrl}/api/shifts/${shift.id}/evidence/does-not-exist`);
+      assert.equal(missing.status, 404);
+      const photo = await api(app.baseUrl, "POST", "/api/shifts/nope/events/photo", {
+        note: "Aisle 7 is blocked.",
+        image: PNG.toString("base64"),
+        contentType: "image/png",
+        fileName: "x.png",
+      });
+      assert.equal(photo.status, 404);
     } finally {
       app.cleanup();
     }
