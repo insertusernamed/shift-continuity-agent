@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JsonFileShiftStore } from "../store/jsonFileStore.ts";
 import { buildHandoff } from "../domain/handoff.ts";
+import { recordableDecision } from "../domain/decide.ts";
+import { validateEvent } from "../domain/validate.ts";
 import { createDemoShift } from "./demo.ts";
 
 let dir: string | undefined;
@@ -37,7 +39,7 @@ describe("seeded demo shift", () => {
     );
     assert.equal(handoff.requiresHumanReview[0]?.claims.length, 2);
     assert.equal(handoff.resolvedDuringShiftCount, 2);
-    assert.ok(shift.endedAt, "demo shift ends with a ready handoff");
+    assert.equal(shift.endedAt, undefined, "demo shift stays open so a human decision can be recorded");
   });
 
   it("keeps resolved aisle/pallet events in history but out of the handoff", () => {
@@ -56,5 +58,52 @@ describe("seeded demo shift", () => {
     );
     assert.ok(!handoffSubjects.includes("aisle 7"));
     assert.ok(!handoffSubjects.includes("pallet 83"));
+  });
+
+  it("after recording the human decision, handoff contains only the freezer inspection", () => {
+    dir = mkdtempSync(join(tmpdir(), "demo-"));
+    const store = new JsonFileShiftStore(join(dir, "shifts.json"));
+    const shift = createDemoShift(store);
+
+    const before = buildHandoff(store.getShiftState(shift.id)!);
+    assert.equal(before.requiresHumanReview.length, 1, "D104 starts conflicted");
+
+    const decision = recordableDecision({
+      state: store.getShiftState(shift.id)!,
+      subject: "damaged case D104",
+      claim: "send to claims",
+      eventId: crypto.randomUUID(),
+      occurredAt: "2026-09-08T05:40:00Z",
+    });
+    store.appendEvent(validateEvent(decision));
+
+    const state = store.getShiftState(shift.id)!;
+    const d104 = state.items.find((i) => i.canonicalSubject === "d104");
+    assert.equal(d104?.status, "decided");
+    assert.equal(d104?.decision?.canonicalValue, "claims");
+
+    const after = buildHandoff(state);
+    assert.deepEqual(after.requiresHumanReview, [], "D104 leaves human review");
+    assert.deepEqual(after.requiresAction.map((i) => i.subject), ["freezer inspection"]);
+    assert.equal(after.decidedDuringShiftCount, 1);
+    assert.equal(state.events.length, 8, "nothing removed from history");
+  });
+
+  it("rejects a decision that is not one of the conflicting claims", () => {
+    dir = mkdtempSync(join(tmpdir(), "demo-"));
+    const store = new JsonFileShiftStore(join(dir, "shifts.json"));
+    const shift = createDemoShift(store);
+
+    assert.throws(
+      () =>
+        recordableDecision({
+          state: store.getShiftState(shift.id)!,
+          subject: "damaged case D104",
+          claim: "donate",
+          eventId: crypto.randomUUID(),
+          occurredAt: "2026-09-08T05:40:00Z",
+        }),
+      /not one of the conflicting claims/,
+    );
   });
 });

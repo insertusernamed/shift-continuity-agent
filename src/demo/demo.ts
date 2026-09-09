@@ -4,6 +4,11 @@ import type { ShiftStore } from "../store/jsonFileStore.ts";
 /**
  * The Phase 6 demo scenario. Seeded as real persisted events through the
  * normal store path, so the demo exercises the same pipeline as live use.
+ *
+ * The shift is left OPEN so the human-review loop is demonstrable: the user
+ * records a decision on the seeded D104 conflict and watches the handoff
+ * change (human-review-loop milestone). Call endShift via the UI/API when
+ * done exploring.
  */
 export function createDemoShift(store: ShiftStore): Shift {
   const shift = store.createShift("Night Shift (demo)", "2026-09-08T02:00:00Z");
@@ -20,6 +25,5 @@ export function createDemoShift(store: ShiftStore): Shift {
 
   for (const event of events) store.appendEvent(event);
 
-  store.endShift(shift.id, "2026-09-08T06:00:00Z");
   return shift;
 }
