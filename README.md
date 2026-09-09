@@ -43,6 +43,8 @@ a provider failure surfaces as a controlled `502` with no state change.
 
 In the UI: **Load Demo Shift** seeds the Phase 6 scenario; **Report in plain words**
 accepts natural-language reports; **Add Event (structured)** posts exact events;
+conflicted items show a **Human decision** button per reported claim (recording one
+flips the item to DECIDED and removes it from the handoff's human-review section);
 **End Shift** freezes the shift and shows the handoff.
 
 ## How the handoff works (the core product)
@@ -54,7 +56,15 @@ Events fold, in `occurredAt` order, into **operational items**:
 | `open` | problem/work still outstanding | **Requires action** |
 | `conflicted` | contradictory claims on one subject | **Requires human review** |
 | `resolved` | cleared/completed by a later event | counted only |
-| `decided` | reconciled by an explicit decision | counted only |
+| `decided` | reconciled by an explicit human decision | counted only |
+
+A conflict is closed by a human, never by the system: recording a decision on a
+conflicted item appends an ordinary `decision_recorded` event through the normal
+store path. The decision is validated against the current folded state (item
+exists, is conflicted, chosen claim is one of the conflicting canonical claims)
+and is final — later decision events and late contradictory reports stay in
+history but cannot reopen the item. Decisions are only accepted through the
+dedicated endpoint, never through the generic event path.
 
 The LLM (or rule-based interpreter) is an **interpreter, not the source of truth**:
 `natural language → structured extraction → schema validation → deterministic domain engine → state`.
@@ -85,7 +95,7 @@ workplace systems. This list is binding until explicitly changed (AGENTS.md §1)
 
 ```
 src/
-  domain/     pure logic: types, validation, subjects, claims, state fold, handoff (no I/O, no frameworks)
+  domain/     pure logic: types, validation, subjects, claims, decisions, state fold, handoff (no I/O, no frameworks)
   store/      ShiftStore interface + JSON-file implementation
   http/       node:http server, API routes, embedded UI
   ingest/     EventInterpreter boundary: deterministic interpreter + optional real LLM adapter
@@ -107,9 +117,15 @@ conflict visibility, noise omission, chronology, history retention).
 | `GET /api/shifts/:id/handoff` | the handoff projection |
 | `POST /api/shifts/:id/events` | append structured event |
 | `POST /api/shifts/:id/events/nl` | natural-language report → validated event |
+| `POST /api/shifts/:id/items/:subject/decision` | record a human decision `{ claim }` on a conflicted item |
 | `POST /api/shifts/:id/end` | end shift (blocks further events) |
 | `POST /api/demo-shift` | seed the demo scenario |
 
 `POST .../events/nl` failure modes: `400` for unparseable reports or schema-invalid
 interpreter output, `502` when the configured LLM provider is unreachable — in every
 failure case nothing is persisted.
+
+`POST .../items/:subject/decision` failure modes: `400` for a missing/empty claim or
+a claim outside the conflicting options, `404` for an unknown item, `409` when the
+item is not conflicted or was already decided (with a machine-readable `code`),
+`409` for an ended shift. Rejected decisions never mutate state.

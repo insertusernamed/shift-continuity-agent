@@ -8,7 +8,6 @@ const KIND_OPTIONS = [
   ["cleared", "Cleared / unblocked"],
   ["work_completed", "Work completed"],
   ["status_claimed", "Status claimed (needs claim)"],
-  ["decision_recorded", "Decision recorded (needs claim)"],
 ] as const;
 
 const STATUS_LABELS: Record<string, string> = {
@@ -99,7 +98,7 @@ export function renderUi(): string {
 
 <script>
 const $ = (id) => document.getElementById(id);
-const KINDS_WITH_CLAIM = new Set(["status_claimed", "decision_recorded"]);
+const KINDS_WITH_CLAIM = new Set(["status_claimed"]);
 const STATUS_LABELS = ${JSON.stringify(STATUS_LABELS)};
 
 let currentShift = null;
@@ -156,8 +155,20 @@ async function loadShift() {
 function itemCard(i) {
   const claims = (i.claims || []).map((c) => \`<li>\${esc(c.value)} <span class="muted">(\${fmt(c.occurredAt)})</span></li>\`).join("");
   const decision = i.decision ? \`<p><strong>Decision:</strong> \${esc(i.decision.value)}</p>\` : "";
+  // One button per distinct canonical claim: the human picks between what
+  // was actually reported — the system never invents options for them.
+  const reported = i.claims || [];
+  const choices = [...new Set(reported.map((c) => c.canonicalValue))]
+    .map((canonical) => {
+      const label = reported.find((c) => c.canonicalValue === canonical).value;
+      return \`<button data-item="\${esc(i.canonicalSubject)}" data-claim="\${esc(canonical)}" class="decisionBtn">\${esc(label)}</button>\`;
+    })
+    .join("");
+  const review = i.status === "conflicted" && choices
+    ? \`<p>Human decision:</p><div class="row">\${choices}</div>\`
+    : "";
   return \`<div class="card"><strong>\${esc(i.subject)}</strong> <span class="badge \${i.status}">\${STATUS_LABELS[i.status] || i.status}</span>
-    <p>\${esc(i.description)}</p>\${claims ? "<ul>" + claims + "</ul>" : ""}\${decision}\${i.blockedByCanonicalSubject ? \`<p class="muted">blocked by: \${esc(i.blockedByCanonicalSubject)}</p>\` : ""}</div>\`;
+    <p>\${esc(i.description)}</p>\${claims ? "<ul>" + claims + "</ul>" : ""}\${decision}\${review}\${i.blockedByCanonicalSubject ? \`<p class="muted">blocked by: \${esc(i.blockedByCanonicalSubject)}</p>\` : ""}</div>\`;
 }
 
 function renderHandoff(h) {
@@ -224,6 +235,20 @@ $("demoBtn").addEventListener("click", async () => {
 });
 
 $("loadBtn").addEventListener("click", loadShift);
+
+// Decision buttons on conflicted items (event delegation: cards re-render).
+$("stateList").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".decisionBtn");
+  if (!btn) return;
+  showError("");
+  try {
+    await api(\`/api/shifts/\${currentShift.id}/items/\${encodeURIComponent(btn.dataset.item)}/decision\`, {
+      method: "POST",
+      body: JSON.stringify({ claim: btn.dataset.claim }),
+    });
+    await loadShift();
+  } catch (err) { showError(err.message); }
+});
 
 $("nlBtn").addEventListener("click", async () => {
   showError("");
