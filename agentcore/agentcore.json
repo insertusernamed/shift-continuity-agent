@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "ShiftContinuityAgent",
+  "version": 1,
+  "managedBy": "CDK",
+  "tags": {
+    "agentcore:created-by": "agentcore-cli",
+    "agentcore:project-name": "ShiftContinuityAgent"
+  },
+  "runtimes": [
+    {
+      "name": "ShiftContinuityAgent",
+      "build": "CodeZip",
+      "entrypoint": "main.js",
+      "codeLocation": "app/ShiftContinuityAgent/",
+      "runtimeVersion": "NODE_22",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP",
+      "envVars": [
+        { "name": "AGENT_MODEL_PROVIDER", "value": "bedrock" },
+        { "name": "AGENT_MODEL_ID", "value": "global.anthropic.claude-haiku-4-5-20251001-v1:0" },
+        { "name": "AWS_REGION", "value": "ca-central-1" }
+      ]
+    }
+  ],
+  "memories": [],
+  "knowledgeBases": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": [],
+  "agentCoreGateways": [],
+  "policyEngines": [],
+  "configBundles": [],
+  "abTests": [],
+  "harnesses": [],
+  "datasets": [],
+  "payments": []
+}

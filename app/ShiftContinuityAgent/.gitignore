@@ -1,0 +1,15 @@
+# Environment variables
+.env
+.env.*
+
+# Node
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# AgentCore CLI staging
+.agentcore/
+
+# OS
+.DS_Store
