@@ -1,13 +1,12 @@
-import { Agent, BedrockModel, Model, type Message } from "@strands-agents/sdk";
+import { Agent, InvokeModelStage, Model, TextBlock, type Message, type SystemPrompt } from "@strands-agents/sdk";
 import type { ShiftStore } from "../store/jsonFileStore.ts";
 import type { EventInterpreter } from "../ingest/interpreter.ts";
-import { canonicalClaim } from "../domain/claims.ts";
-import { canonicalSubject } from "../domain/subjects.ts";
+import { createAgentModel, resolveAgentModelConfig, type AgentModelProvider } from "./modelProvider.ts";
+import { classifyAgentRequest, extractExplicitHumanDecision, isHumanDecisionAuthorization, routingDirective } from "./requestRouting.ts";
 import {
   createShiftContinuityTools,
   type AgentItemView,
   type HandoffToolResult,
-  type HumanDecisionAuthorization,
   type ShiftContinuityTools,
   type ShiftStateToolResult,
   type ToolName,
@@ -18,21 +17,29 @@ import {
 /**
  * The system prompt is deliberately explicit about the source of truth and
  * human authority. The Strands agent may choose tools, but it cannot decide
- * the operational state or resolve a conflict in prose.
+ * the operational state or resolve a conflict in prose. Routing rules are
+ * spelled out so the model does not substitute a state read for a report or
+ * guess whether a decision is authorized — those two facts are established
+ * deterministically (see requestRouting.ts) before the model runs.
  */
 export const SHIFT_CONTINUITY_SYSTEM_PROMPT = [
   "You are ShiftContinuityAgent, a concise operational shift assistant.",
   "Operational truth comes only from the deterministic tools and domain state.",
   "Never invent current state and never rely on remembered conversation state when state matters.",
-  "Use get_shift_state whenever the user's question depends on current state.",
-  "Use get_handoff for handoff contents; do not author an authoritative handoff yourself.",
-  "Use report_event for incoming operational reports. Never claim an event was stored unless report_event succeeded.",
-  "Never resolve conflicting claims yourself and never make a human-authority decision.",
-  "Only call record_human_decision after the human explicitly selected one of the available claims in the current request.",
-  "If a human has not selected a claim, surface the conflicting options and say that human review is required.",
-  "Surface human review only when the deterministic system marks something conflicted.",
-  "Treat tool errors as real failures and report them concisely without claiming success.",
-  "Prefer concise operational responses.",
+  "Routing:",
+  "- If the user is reporting something observed or done in the operation — even if it sounds odd or uninterpretable, e.g. \"Aisle 7 is blocked\", \"Pallet 83 is finished\", \"The freezer inspection was missed\", \"the vibes are off today\" — call report_event with the full user text and let the deterministic validator accept or reject it. Do not substitute get_shift_state merely because a conflict exists.",
+  "- Use get_shift_state when the user is asking about current state (e.g. \"what's the state\", \"is D104 still conflicted\", \"what should we do\").",
+  "- Use get_handoff when the user is asking what the incoming shift needs to know (e.g. \"handoff\", \"what's left\", \"morning shift\").",
+  "- Resolution updates are reports too: call report_event for \"Aisle 7 is clear now\".",
+  "Human authority:",
+  "- Never resolve conflicting claims yourself and never make a human-authority decision.",
+  "- Only call record_human_decision when invocationState contains explicit human authorization (a human selected one of the available claims in the current request). Never fabricate that selection.",
+  "- If a human has not selected a claim, surface the conflicting options and say that human review is required.",
+  "- Surface human review only when the deterministic system marks something conflicted.",
+  "Honesty:",
+  "- Treat tool errors as real failures and report them concisely without claiming success.",
+  "- Never claim an event was stored unless report_event succeeded.",
+  "- Prefer concise operational responses.",
 ].join("\n");
 
 export type AgentMode = "deterministic" | "bedrock";
@@ -43,6 +50,8 @@ export interface AgentRunner {
 }
 
 export interface BedrockAgentConfig {
+  /** Explicit provider: 'bedrock' (Nova via Converse) or 'bedrock-openai' (Luna via Responses API). */
+  provider?: AgentModelProvider;
   region?: string;
   modelId?: string;
   maxTokens?: number;
@@ -107,8 +116,14 @@ export function createShiftContinuityAgent(
   return {
     async invoke(userText: string): Promise<ShiftContinuityAgentResult> {
       const startTrace = trace.length;
+      // Deterministic, model-independent pre-processing: whether this request
+      // legally authorizes a human decision, and what kind of request it is.
+      // The tool gate still rejects any unauthorized decision call, and the
+      // runner injects a routing directive from this state for obvious cases.
       const authorization = extractExplicitHumanDecision(userText);
-      const invocationState: Record<string, unknown> = {};
+      const invocationState: Record<string, unknown> = {
+        routingIntent: classifyAgentRequest(userText),
+      };
       if (authorization) invocationState.humanDecisionAuthorization = authorization;
 
       try {
@@ -158,12 +173,16 @@ export class StrandsAgentRunner implements AgentRunner {
       process.env.AWS_PROFILE = bedrockConfig.profile;
     }
 
-    const model = config.model ?? new BedrockModel({
-      region: bedrockConfig.region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION,
-      modelId: bedrockConfig.modelId ?? process.env.BEDROCK_MODEL_ID ?? "ca.amazon.nova-lite-v1:0",
+    // Explicit provider selection (AGENT_MODEL_PROVIDER) + explicit model id
+    // (AGENT_MODEL_ID, legacy BEDROCK_MODEL_ID fallback). The provider decides
+    // the model adapter; the model id is never used to guess the provider.
+    const resolved = resolveAgentModelConfig(process.env);
+    const model = config.model ?? createAgentModel({
+      provider: bedrockConfig.provider ?? resolved.provider,
+      modelId: bedrockConfig.modelId ?? resolved.modelId,
+      region: bedrockConfig.region ?? resolved.region,
       maxTokens: bedrockConfig.maxTokens ?? 700,
       temperature: bedrockConfig.temperature ?? 0,
-      stream: true,
     });
     this.modelId = model.getConfig().modelId;
     this.toolNames = config.tools.tools.map((tool) => tool.name as ToolName);
@@ -176,6 +195,21 @@ export class StrandsAgentRunner implements AgentRunner {
       tools: [...config.tools.tools],
       printer: false,
       retryStrategy: null,
+    });
+
+    // Deterministic routing nudge: when the pre-invocation classifier or the
+    // human-decision authorizer produced a directive, append it to the system
+    // prompt for the FIRST model call only. The model still selects and calls
+    // the tool (Strands stays the orchestrator), but it no longer has to guess
+    // the obvious intent. Later loop calls summarize tool results and are not
+    // re-routed.
+    this.agent.addMiddleware(InvokeModelStage.Input, (context) => {
+      const directive = routingDirective(context.invocationState);
+      if (!directive || context.messages.length !== 1) return context;
+      return {
+        ...context,
+        systemPrompt: appendSystemPromptDirective(context.systemPrompt, directive),
+      };
     });
   }
 
@@ -215,39 +249,25 @@ export class DeterministicAgentRunner implements AgentRunner {
       return { response: "" };
     }
 
-    if (looksLikeHandoffQuestion(userText)) {
-      await this.tools.getHandoff.invoke({});
-    } else if (looksLikeStateQuestion(userText)) {
-      await this.tools.getShiftState.invoke({});
-    } else {
-      await this.tools.reportEvent.invoke({ report: userText });
+    switch (classifyAgentRequest(userText)) {
+      case "handoff":
+        await this.tools.getHandoff.invoke({});
+        break;
+      case "state":
+        await this.tools.getShiftState.invoke({});
+        break;
+      default:
+        await this.tools.reportEvent.invoke({ report: userText });
     }
     return { response: "" };
   }
 }
 
-/**
- * Conservative parser used only to establish that a human explicitly selected
- * a value for the current request. It never chooses a value and does not
- * inspect history. The decision tool performs the authoritative validation.
- */
-export function extractExplicitHumanDecision(text: string): HumanDecisionAuthorization | undefined {
-  const imperative = text.match(
-    /\b(?:send|move|route|mark)\s+(?:the\s+)?(?:damaged\s+)?(?:case\s+)?([A-Za-z]+\d+)\s+(?:to\s+)?(claims|discard(?:ed)?|salvage|donate)\b/i,
-  );
-  const declarative = text.match(
-    /\b(?:damaged\s+)?(?:case\s+)?([A-Za-z]+\d+)\s+(?:should|must)\s+(?:go|be\s+(?:sent|marked))\s+(?:to\s+)?(claims|discard(?:ed)?|salvage|donate)\b/i,
-  );
-  const match = imperative ?? declarative;
-  if (!match) return undefined;
-  const subject = match[1]!;
-  const claim = match[2]!;
-  return {
-    subject,
-    canonicalSubject: canonicalSubject(subject),
-    claim,
-    canonicalClaim: canonicalClaim(claim),
-  };
+/** Append a routing directive to the system prompt, preserving any base prompt. */
+function appendSystemPromptDirective(prompt: SystemPrompt | undefined, directive: string): SystemPrompt {
+  if (prompt === undefined) return directive;
+  if (typeof prompt === "string") return `${prompt}\n\n${directive}`;
+  return [...prompt, new TextBlock(directive)];
 }
 
 function projectAuthoritativeResult(
@@ -331,19 +351,3 @@ function renderHandoffResponse(handoff: HandoffToolResult): string {
   ].join(" ");
 }
 
-function looksLikeHandoffQuestion(text: string): boolean {
-  return /\b(?:handoff|what(?:'s| is) left|morning shift|next shift|remaining)\b/i.test(text);
-}
-
-function looksLikeStateQuestion(text: string): boolean {
-  return /\b(?:current state|what should we do|what do we do|conflict|conflicted|pick|choose|decide|review|open items?)\b/i.test(text);
-}
-
-function isHumanDecisionAuthorization(value: unknown): value is HumanDecisionAuthorization {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Partial<HumanDecisionAuthorization>;
-  return typeof candidate.subject === "string"
-    && typeof candidate.claim === "string"
-    && typeof candidate.canonicalSubject === "string"
-    && typeof candidate.canonicalClaim === "string";
-}

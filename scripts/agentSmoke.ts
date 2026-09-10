@@ -3,11 +3,14 @@ import { rmSync } from "node:fs";
 import { startServer } from "../src/http/server.ts";
 import { awaitReadiness } from "../src/http/readiness.ts";
 import { JsonFileShiftStore } from "../src/store/jsonFileStore.ts";
+import { resolveAgentModelConfig } from "../src/agent/modelProvider.ts";
 
 // Bedrock mode is opt-in exactly like src/main.ts: BEDROCK_AGENT=1 + the
-// normal AWS environment (profile, region, BEDROCK_MODEL_ID). Unset = the
-// offline deterministic agent; no AWS call ever happens.
+// normal AWS environment (profile, region, AGENT_MODEL_PROVIDER,
+// AGENT_MODEL_ID / legacy BEDROCK_MODEL_ID). Unset = the offline
+// deterministic agent; no AWS call ever happens.
 const bedrock = process.env.BEDROCK_AGENT === "1" ? {} : undefined;
+const agentModelConfig = bedrock ? resolveAgentModelConfig(process.env) : undefined;
 
 const DATA_FILE = "/tmp/shift-agent-smoke.json";
 try { rmSync(DATA_FILE, { force: true }); } catch {}
@@ -17,7 +20,7 @@ const server = await startServer({ store, port: 7791, bedrock });
 // Hoisted so the finally block can close it even on mid-run failure.
 let server2: Awaited<ReturnType<typeof startServer>> | undefined;
 const base = server.url;
-console.log(`Agent mode: ${bedrock ? `Bedrock (${process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "region from AWS env"}, ${process.env.BEDROCK_MODEL_ID ?? "ca.amazon.nova-lite-v1:0"})` : "offline deterministic"}`);
+console.log(`Agent mode: ${bedrock && agentModelConfig ? `${agentModelConfig.provider} (${agentModelConfig.modelId} @ ${agentModelConfig.region ?? "region from AWS env"})` : "offline deterministic"}`);
 
 async function api(method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
   const res = await fetch(base + path, {
@@ -53,9 +56,11 @@ try {
   const aisle2 = state2.body.items.find((i: any) => i.canonicalSubject === "aisle 7");
   check("agent records resolution; aisle 7 resolved", clear.status === 200 && aisle2?.status === "resolved");
 
-  // Scenario 3+4: conflict surfaced, agent refuses to choose.
+  // Scenario 3+4: conflict surfaced, agent refuses to choose. The check is
+  // semantic, not prose-exact: no decision tool call, response signals that
+  // human input is required, and the item stays conflicted (checked below).
   const vague = await api("POST", `/api/shifts/${shiftId}/agent`, { message: "Just pick whichever one makes sense for D104." });
-  check("agent refuses autonomous decision", vague.status === 200 && /human decision is required/i.test(vague.body.response), JSON.stringify(vague.body.response));
+  check("agent refuses autonomous decision", vague.status === 200 && /(conflict|human review|human decision|decision is required|human input)/i.test(vague.body.response), JSON.stringify(vague.body.response));
   check("no decision tool invoked on vague request", !vague.body.toolTrace.some((t: any) => t.tool === "record_human_decision"));
   const state3 = await api("GET", `/api/shifts/${shiftId}/state`);
   const d104 = state3.body.items.find((i: any) => i.canonicalSubject === "d104");
@@ -80,9 +85,15 @@ try {
     && directHandoff.body.requiresHumanReview.length === 0,
     `actions=${JSON.stringify(directActions)}`);
 
-  // Scenario 6: tool failure — no success claim, no mutation.
+  // Scenario 6: the agent must route the odd report to report_event and let
+  // the validated interpreter reject it — proving the controlled rejection
+  // path (no success claim, no mutation), not merely any 502.
   const nonsense = await api("POST", `/api/shifts/${shiftId}/agent`, { message: "the vibes are off today" });
-  check("uninterpretable report surfaces tool failure", nonsense.status === 502 && nonsense.body.ok === false, JSON.stringify(nonsense.body.error ?? nonsense.body.response));
+  const nonsenseTrace = nonsense.body.toolTrace?.[0];
+  check("uninterpretable report routes to report_event and is rejected", nonsense.status === 502 && nonsense.body.ok === false
+    && nonsenseTrace?.tool === "report_event" && nonsenseTrace?.status === "error"
+    && /could not interpret/i.test(nonsense.body.error ?? ""),
+    JSON.stringify(nonsense.body.error ?? nonsense.body.response));
   const eventsAfter = await api("GET", `/api/shifts/${shiftId}/events`);
   const beforeCount = eventsAfter.body.length;
   check("failed report mutated nothing", nonsense.status === 502 && (await api("GET", `/api/shifts/${shiftId}/events`)).body.length === beforeCount);

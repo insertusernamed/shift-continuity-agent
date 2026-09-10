@@ -78,6 +78,96 @@ class RecordingModel extends Model {
   }
 }
 
+/**
+ * Fake model that records the system prompt handed to the provider on every
+ * stream call, then drives a real tool through the loop like
+ * ToolUseRecordingModel. Proves the routing-directive middleware injects only
+ * into the first model call of an invocation.
+ */
+class DirectiveCapturingModel extends Model {
+  systemPrompts: string[] = [];
+  private calls = 0;
+
+  updateConfig(): void {}
+
+  getConfig(): { modelId?: string } {
+    return { modelId: "directive-capturing-model" };
+  }
+
+  async *stream(_messages: unknown, options?: { systemPrompt?: unknown }): AsyncGenerator<ModelStreamEvent> {
+    this.calls += 1;
+    this.systemPrompts.push(typeof options?.systemPrompt === "string" ? options.systemPrompt : JSON.stringify(options?.systemPrompt));
+    if (this.calls === 1) {
+      yield { type: "modelMessageStartEvent", role: "assistant" };
+      yield {
+        type: "modelContentBlockStartEvent",
+        start: { type: "toolUseStart", name: "report_event", toolUseId: "call_1" },
+      };
+      yield {
+        type: "modelContentBlockDeltaEvent",
+        delta: { type: "toolUseInputDelta", input: JSON.stringify({ report: "the vibes are off today" }) },
+      };
+      yield { type: "modelContentBlockStopEvent" };
+      yield { type: "modelMessageStopEvent", stopReason: "toolUse" };
+      return;
+    }
+    yield { type: "modelMessageStartEvent", role: "assistant" };
+    yield { type: "modelContentBlockStartEvent" };
+    yield { type: "modelContentBlockDeltaEvent", delta: { type: "textDelta", text: "done" } };
+    yield { type: "modelContentBlockStopEvent" };
+    yield { type: "modelMessageStopEvent", stopReason: "endTurn" };
+  }
+}
+
+/**
+ * Fake model that drives a real tool through the Strands loop: the first
+ * stream call emits a tool-use block, the second (after the tool result) a
+ * plain text end-turn. Emits the full delta→stop sequence because the SDK
+ * aggregates blocks only at block-stop.
+ */
+class ToolUseRecordingModel extends Model {
+  private calls = 0;
+  private readonly toolName: string;
+  private readonly toolInput: Record<string, unknown>;
+  private readonly textAfterTool: string;
+
+  constructor(options: { toolName: string; toolInput: Record<string, unknown>; textAfterTool?: string }) {
+    super();
+    this.toolName = options.toolName;
+    this.toolInput = options.toolInput;
+    this.textAfterTool = options.textAfterTool ?? "done";
+  }
+
+  updateConfig(): void {}
+
+  getConfig(): { modelId?: string } {
+    return { modelId: "fake-tool-use-model" };
+  }
+
+  async *stream(): AsyncGenerator<ModelStreamEvent> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      yield { type: "modelMessageStartEvent", role: "assistant" };
+      yield {
+        type: "modelContentBlockStartEvent",
+        start: { type: "toolUseStart", name: this.toolName, toolUseId: "call_1" },
+      };
+      yield {
+        type: "modelContentBlockDeltaEvent",
+        delta: { type: "toolUseInputDelta", input: JSON.stringify(this.toolInput) },
+      };
+      yield { type: "modelContentBlockStopEvent" };
+      yield { type: "modelMessageStopEvent", stopReason: "toolUse" };
+      return;
+    }
+    yield { type: "modelMessageStartEvent", role: "assistant" };
+    yield { type: "modelContentBlockStartEvent" };
+    yield { type: "modelContentBlockDeltaEvent", delta: { type: "textDelta", text: this.textAfterTool } };
+    yield { type: "modelContentBlockStopEvent" };
+    yield { type: "modelMessageStopEvent", stopReason: "endTurn" };
+  }
+}
+
 describe("ShiftContinuityAgent", () => {
   it("registers the four typed application tools and system prompt on the real Strands loop", async () => {
     const { store, shift } = makeStore();
@@ -191,9 +281,11 @@ describe("ShiftContinuityAgent", () => {
 
     const result = await agent.invoke("Just pick whichever one makes sense for D104.");
 
+    // Semantic behavior, not exact prose: no decision tool call, the item
+    // stays conflicted, and the response says human input is required.
     assert.deepEqual(calls, ["get_shift_state"]);
     assert.equal(store.getShiftState(shift.id)?.items[0]?.status, "conflicted");
-    assert.match(result.response, /human decision is required/i);
+    assert.match(result.response, /(conflict|human review|human decision|decision is required|human input)/i);
     assert.match(result.response, /send to claims vs discarded/i);
   });
 
@@ -215,6 +307,134 @@ describe("ShiftContinuityAgent", () => {
     assert.equal(store.getShiftState(shift.id)?.items[0]?.status, "decided");
     assert.equal(result.decision?.canonicalValue, "claims");
     assert.match(result.response, /Recorded human decision/i);
+  });
+
+  it("routes a report through the same tool under either the bedrock or bedrock-openai provider", async () => {
+    for (const provider of ["bedrock", "bedrock-openai"] as const) {
+      const { store, shift } = makeStore();
+      const tools = createShiftContinuityTools({
+        store,
+        shiftId: shift.id,
+        interpreter: new DeterministicEventInterpreter(),
+        now: () => "2026-09-08T02:11:00Z",
+      });
+      const model = new ToolUseRecordingModel({ toolName: "report_event", toolInput: { report: "Aisle 7 is blocked." } });
+      const runner = new StrandsAgentRunner({ tools, model, bedrock: { provider, modelId: "global.openai.gpt-5.6-luna" } });
+
+      const result = await runner.invoke("Aisle 7 is blocked.", {});
+
+      assert.equal(result.response, "done");
+      assert.equal(store.getEvents(shift.id).length, 1);
+      const item = store.getShiftState(shift.id)?.items[0];
+      assert.equal(item?.status, "open");
+      assert.equal(tools.getTrace()[0]?.tool, "report_event");
+      assert.equal(tools.getTrace()[0]?.status, "success");
+    }
+  });
+
+  it("allows record_human_decision when the deterministic layer pre-authorized it", async () => {
+    const { store, shift } = makeStore();
+    seedConflict(store, shift.id);
+    const tools = createShiftContinuityTools({
+      store,
+      shiftId: shift.id,
+      interpreter: new DeterministicEventInterpreter(),
+      now: () => "2026-09-08T05:40:00Z",
+    });
+    const model = new ToolUseRecordingModel({
+      toolName: "record_human_decision",
+      toolInput: { subject: "D104", claim: "claims" },
+    });
+    const runner = new StrandsAgentRunner({ tools, model, bedrock: { provider: "bedrock", modelId: "global.anthropic.claude-haiku-4-5-20251001-v1:0" } });
+
+    const result = await runner.invoke("Send D104 to claims.", {
+      routingIntent: "decision",
+      humanDecisionAuthorization: {
+        subject: "D104",
+        canonicalSubject: "d104",
+        claim: "claims",
+        canonicalClaim: "claims",
+      },
+    });
+
+    assert.equal(result.response, "done");
+    const trace = tools.getTrace()[0];
+    assert.equal(trace?.tool, "record_human_decision");
+    assert.equal(trace?.status, "success");
+    assert.equal(store.getShiftState(shift.id)?.items[0]?.status, "decided");
+  });
+
+  it("routes an uninterpretable report through report_event with zero mutation", async () => {
+    const { store, shift } = makeStore();
+    const tools = createShiftContinuityTools({
+      store,
+      shiftId: shift.id,
+      interpreter: new DeterministicEventInterpreter(),
+    });
+    const model = new ToolUseRecordingModel({
+      toolName: "report_event",
+      toolInput: { report: "the vibes are off today" },
+      textAfterTool: "report rejected",
+    });
+    const runner = new StrandsAgentRunner({ tools, model, bedrock: { provider: "bedrock" } });
+
+    const result = await runner.invoke("the vibes are off today", { routingIntent: "report" });
+
+    assert.equal(result.response, "report rejected");
+    const trace = tools.getTrace()[0];
+    assert.equal(trace?.tool, "report_event");
+    assert.equal(trace?.status, "error");
+    assert.match(trace?.summary ?? "", /could not interpret/i);
+    assert.equal(store.getEvents(shift.id).length, 0);
+  });
+
+  it("injects the deterministic routing directive into the first model call only", async () => {
+    const { store, shift } = makeStore();
+    const tools = createShiftContinuityTools({
+      store,
+      shiftId: shift.id,
+      interpreter: new DeterministicEventInterpreter(),
+    });
+    const model = new DirectiveCapturingModel();
+    const runner = new StrandsAgentRunner({ tools, model, bedrock: { provider: "bedrock" } });
+
+    const result = await runner.invoke("the vibes are off today", { routingIntent: "report" });
+
+    assert.equal(result.response, "done");
+    assert.equal(model.systemPrompts.length, 2);
+    // First model call carries the base prompt plus the routing directive.
+    assert.match(model.systemPrompts[0]!, /shift assistant/i);
+    assert.match(model.systemPrompts[0]!, /Deterministic routing/);
+    assert.match(model.systemPrompts[0]!, /report_event/);
+    // Later loop calls (summarizing the tool result) do not re-route.
+    assert.doesNotMatch(model.systemPrompts[1]!, /Deterministic routing/);
+  });
+
+  it("keeps the human-decision authorization gate model-independent under bedrock-openai", async () => {
+    const { store, shift } = makeStore();
+    seedConflict(store, shift.id);
+    const tools = createShiftContinuityTools({
+      store,
+      shiftId: shift.id,
+      interpreter: new DeterministicEventInterpreter(),
+    });
+    // The model attempts an autonomous decision with no human authorization
+    // in invocationState; the tool itself must refuse regardless of provider.
+    const model = new ToolUseRecordingModel({
+      toolName: "record_human_decision",
+      toolInput: { subject: "D104", claim: "claims" },
+    });
+    const runner = new StrandsAgentRunner({ tools, model, bedrock: { provider: "bedrock-openai", modelId: "global.openai.gpt-5.6-luna" } });
+
+    const result = await runner.invoke("Handle D104 however you think is best.", {});
+
+    assert.equal(result.response, "done");
+    const trace = tools.getTrace()[0];
+    assert.equal(trace?.tool, "record_human_decision");
+    assert.equal(trace?.status, "error");
+    assert.match(trace?.summary ?? "", /explicit human decision/i);
+    assert.equal(store.getEvents(shift.id).length, 2);
+    assert.equal(store.getShiftState(shift.id)?.items[0]?.status, "conflicted");
   });
 
   it("does not claim success when report_event fails", async () => {
