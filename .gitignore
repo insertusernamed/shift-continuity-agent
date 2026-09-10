@@ -8,3 +8,6 @@ data/
 *.sqlite
 *.sqlite3
 .DS_Store
+
+# Local agent tooling state
+.freebuff/

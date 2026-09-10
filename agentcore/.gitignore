@@ -1,0 +1,13 @@
+# Secrets (local environment files are never committed)
+.env.local
+
+# CDK Build Artifacts
+cdk/cdk.out/
+cdk/node_modules/
+
+# CLI internals. Generated per developer and per AWS account, and recreated by
+# `agentcore deploy`; committing it would pin the repo to one account.
+.cli/
+
+# Ephemeral Staging
+.cache/*
