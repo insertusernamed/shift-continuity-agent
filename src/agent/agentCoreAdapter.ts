@@ -3,6 +3,7 @@ import { createDemoShift } from "../demo/demo.ts";
 import { seedCoreDemoShiftInto } from "../demo/demoScenario.ts";
 import { InMemoryShiftStore } from "../store/inMemoryStore.ts";
 import type { ShiftStore } from "../store/jsonFileStore.ts";
+import { StoreError } from "../store/jsonFileStore.ts";
 import {
   ensureSeededShift,
   hydrateShiftStore,
@@ -108,17 +109,27 @@ export interface AgentCoreSession {
  * may serve many sessions; on AgentCore Runtime each microVM serves one
  * session, so this holds one entry there. State is ephemeral by design
  * (see README persistence limitation).
+ *
+ * A shift selector is refused here rather than ignored: this registry can only
+ * ever host the one shift it seeded, so honouring an arbitrary id is impossible
+ * and pretending otherwise would silently operate on the wrong shift.
  */
-export function createAgentCoreSessionRegistry(maxSessions = 32): { get(sessionId: string): AgentCoreSession } {
+export function createAgentCoreSessionRegistry(
+  maxSessions = 32,
+): { get(sessionId: string, shiftId?: string): AgentCoreSession } {
   const sessions = new Map<string, AgentCoreSession>();
 
-  function get(sessionId: string): AgentCoreSession {
+  function get(sessionId: string, shiftId?: string): AgentCoreSession {
     const existing = sessions.get(sessionId);
     if (existing) {
       sessions.delete(sessionId);
       sessions.set(sessionId, existing);
+      if (shiftId !== undefined && shiftId !== existing.shiftId) {
+        throw new StoreError(ephemeralSelectorError(shiftId, existing.shiftId));
+      }
       return existing;
     }
+    if (shiftId !== undefined) throw new StoreError(ephemeralSelectorError(shiftId));
     if (sessions.size >= maxSessions) {
       const oldest = sessions.keys().next().value;
       if (oldest !== undefined) sessions.delete(oldest);
@@ -134,6 +145,13 @@ export function createAgentCoreSessionRegistry(maxSessions = 32): { get(sessionI
   return { get };
 }
 
+function ephemeralSelectorError(shiftId: string, knownShiftId?: string): string {
+  const suffix = knownShiftId
+    ? `it only hosts its own seeded shift "${knownShiftId}"`
+    : "arbitrary shifts require a durable store (SHIFT_STORE=dynamodb or json)";
+  return `this runtime has no durable store, so shift "${shiftId}" is unavailable; ${suffix}`;
+}
+
 /**
  * How a runtime invocation obtains its store. Two strategies, chosen by
  * configuration rather than scattered environment checks:
@@ -146,7 +164,14 @@ export function createAgentCoreSessionRegistry(maxSessions = 32): { get(sessionI
  *   appended. This is what makes state survive a cold start.
  */
 export interface AgentCoreSessionProvider {
-  get(sessionId: string): Promise<AgentCoreSession>;
+  /**
+   * Resolve the store for one invocation. `shiftId` is application context
+   * supplied by the caller (never chosen by the model); when present it selects
+   * the exact shift to operate on, and the runtime hydrates that shift or fails
+   * explicitly. When absent, the runtime's default (durable) or session
+   * (ephemeral) shift is used.
+   */
+  get(sessionId: string, shiftId?: string): Promise<AgentCoreSession>;
 }
 
 export interface AgentCoreSessionProviderOptions {
@@ -163,21 +188,25 @@ export function createAgentCoreSessionProvider(
 
   if (config.kind === "memory") {
     const registry = createAgentCoreSessionRegistry(MAX_AGENTCORE_SESSIONS);
-    return { async get(sessionId) {
-      return registry.get(sessionId);
+    return { async get(sessionId, shiftId) {
+      return registry.get(sessionId, shiftId);
     } };
   }
 
   // One `ensure` per process: concurrent invocations share the same promise, so
   // a cold start cannot decide twice to seed a second demo shift.
   const durable = options.durableStore ?? createAsyncShiftStore(config);
-  const shiftId: Promise<string> = ensureSeededShift(durable, async () => {
+  const defaultShiftId: Promise<string> = ensureSeededShift(durable, async () => {
     await seedCoreDemoShiftInto(durable);
   }).then((shift) => shift.id);
 
   return {
-    async get() {
-      const id = await shiftId;
+    async get(_sessionId, requestedShiftId) {
+      // A requested shift is hydrated from the durable log, so it carries its own
+      // history and cannot be contaminated by whatever the default shift holds.
+      // An unknown id throws rather than falling back, because silently serving
+      // a different shift is exactly the failure this selector exists to prevent.
+      const id = requestedShiftId ?? (await defaultShiftId);
       const hydrated = await hydrateShiftStore(durable, id);
       return { store: hydrated.store, shiftId: id, flush: () => hydrated.flush() };
     },

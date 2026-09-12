@@ -74,13 +74,20 @@ export async function appendDemoPhotoReport(input: {
  * there is no second copy of the demo data. The photo-evidence beat is omitted
  * deliberately: its bytes live on the local filesystem, which the durable runtime
  * does not have (see the README persistence section).
+ *
+ * `name`/`startedAt` are overridable so an isolated caller (the remote smoke)
+ * can seed a distinctly named shift from the same event definitions instead of
+ * copying them.
  */
-export async function seedCoreDemoShiftInto(store: AsyncShiftStore): Promise<Shift> {
+export async function seedCoreDemoShiftInto(
+  store: AsyncShiftStore,
+  options: { name?: string; startedAt?: string } = {},
+): Promise<Shift> {
   const template = new InMemoryShiftStore((s) => {
     createDemoShift(s);
   });
   const source = template.listShifts()[0]!;
-  const shift = await store.createShift(source.name, source.startedAt);
+  const shift = await store.createShift(options.name ?? source.name, options.startedAt ?? source.startedAt);
   for (const event of template.getEvents(source.id)) {
     await store.appendEvent({ ...event, shiftId: shift.id });
   }

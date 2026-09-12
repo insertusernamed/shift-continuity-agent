@@ -249,10 +249,16 @@ Both paths use `src/agent/*` and `src/domain/*` unchanged.
 ### Request contract
 
 `POST /invocations` accepts either `{ "prompt": "..." }` (what `agentcore invoke`
-sends) or `{ "shiftId": "...", "message": "..." }`. The response is a JSON
-envelope: `result` (agent text), `ok`, `toolTrace`, and — when the tool exposed
-them — `state`, `handoff`, `item`, `decision`. Session identity comes from the
-AgentCore session header; each session gets its own isolated, demo-seeded store.
+sends) or `{ "shiftId": "...", "message": "...", "actor": "Shift Supervisor" }`.
+The response is a JSON envelope: `result` (agent text), `ok`, `toolTrace`, and —
+when the tool exposed them — `state`, `handoff`, `item`, `decision`.
+
+Shift identity is application context, never model reasoning. With a durable store
+the runtime hosts many shifts, so `shiftId` selects exactly which one to hydrate,
+and an unknown id fails explicitly instead of silently operating on a different
+shift. Without a durable store each session gets its own isolated, demo-seeded
+store and a selector is refused (there is only ever the one shift). `actor` is the
+display identity passed through to any human action the request authorizes.
 
 ### Local AgentCore test
 
@@ -279,13 +285,19 @@ AWS_PROFILE=shift-handoff AWS_REGION=ca-central-1 agentcore status
 # Official CLI
 AWS_PROFILE=shift-handoff AWS_REGION=ca-central-1 agentcore invoke --session-id "<33+ char session id>" "Aisle 7 is blocked."
 
-# Remote smoke: official InvokeAgentRuntime SDK path, all five scenarios
-AWS_PROFILE=shift-handoff AWS_REGION=ca-central-1 npx tsx scripts/agentCoreRemoteSmoke.ts
+# Remote smoke: official InvokeAgentRuntime SDK path, all scenarios, isolated per run
+SHIFT_STORE=dynamodb SHIFT_TABLE_NAME=ShiftContinuityAgent-shift-events \
+  AWS_PROFILE=shift-handoff AWS_REGION=ca-central-1 \
+  npx tsx scripts/agentCoreRemoteSmoke.ts
 ```
 
 The remote smoke reads the runtime ARN from `agentcore/.cli/deployed-state.json`
-(or `AGENT_RUNTIME_ARN`), uses one session id so state persists across the
-scenarios, spaces requests, and retries **only** documented transient AWS
+(or `AGENT_RUNTIME_ARN`). Because the deployed runtime is durable, each run seeds
+its own uniquely named shift — from the canonical demo scenario, so no events are
+duplicated — into the same table, verifies the exact starting state before
+asserting anything, and targets that shift by id on every request. Runs therefore
+never reuse, mutate, or clear another run's history; the run's shift id is printed
+at the end. It spaces requests, and retries **only** documented transient AWS
 throttling (429 / "Too many requests") with bounded backoff — never a semantic,
 tool, validation, or authorization failure.
 
@@ -345,9 +357,31 @@ failure rather than claiming a write that did not happen.
 Verify the deployed history at any time (a fresh store in a separate process):
 
 ```bash
+# List every shift in the table
 SHIFT_STORE=dynamodb SHIFT_TABLE_NAME=ShiftContinuityAgent-shift-events \
   AWS_PROFILE=shift-handoff AWS_REGION=ca-central-1 \
   npx tsx scripts/dynamoPersistenceCheck.ts
+
+# Inspect exactly one shift (the id a remote smoke run printed); with an explicit
+# id there is no fallback to another shift, so a typo fails loudly.
+SHIFT_STORE=dynamodb SHIFT_TABLE_NAME=ShiftContinuityAgent-shift-events \
+  AWS_PROFILE=shift-handoff AWS_REGION=ca-central-1 \
+  npx tsx scripts/dynamoPersistenceCheck.ts <shiftId>
+```
+
+**Smoke-run shifts.** Each remote smoke run leaves its own `remote-smoke-<runId>`
+shift behind, by design: that is what makes runs repeatable, and it means history is
+never cleared to make a test pass. They are tiny and harmless, and deleting them is
+optional — never a prerequisite for a green run. To remove them, list the shifts
+with the command above and delete each shift's partition items:
+
+```bash
+aws dynamodb query --table-name ShiftContinuityAgent-shift-events --region ca-central-1 \
+  --key-condition-expression "PK = :pk" --expression-attribute-values '{":pk":{"S":"SHIFT#<shiftId>"}}' \
+  --query 'Items[].{PK:PK,SK:SK}' --output json
+# then, for each returned PK/SK pair:
+aws dynamodb delete-item --table-name ShiftContinuityAgent-shift-events --region ca-central-1 \
+  --key '{"PK":{"S":"SHIFT#<shiftId>"},"SK":{"S":"<SK>"}}'
 ```
 
 **Remaining limitations.** This is a hackathon deployment, not production persistence:
@@ -361,12 +395,17 @@ SHIFT_STORE=dynamodb SHIFT_TABLE_NAME=ShiftContinuityAgent-shift-events \
   table (removal policy `DESTROY`).
 - Event ids are unique per `(occurredAt, id)` key; a duplicate id replayed at a
   *different* timestamp is not deduplicated.
+- Isolated smoke shifts accumulate in the table (one per remote run). That is
+  intentional, not leakage: no run ever writes to, reads, or clears another run's
+  shift.
 
 ## Screenshots and submission assets
 
-`docs/stills/` holds six stills of the real UI captured from a running app:
+`docs/stills/` holds seven stills of the real UI captured from a running app:
 hero/agent, dashboard with the active conflict, a live tool trace, the recorded human
-decision, the final handoff, and photo evidence in history.
+decision (with its attribution and reopen action), the final handoff, photo evidence in
+history, and — for the optional reopen beat — the item back under human review.
+`07-decision-reopened.png` is the only still the main 3:45 cut does not need.
 
 ```bash
 DATA_FILE=data/stills/shifts.json EVIDENCE_DIR=data/stills/evidence npx tsx scripts/resetDemo.ts
@@ -486,7 +525,7 @@ so the system fully works with no LLM configured.
 - Demo/presentation readiness: seeded demo shift, a presentation view, a demo-flow guide in the header, a reset/seed script, and a headless-Chrome screenshot script producing `docs/stills/`.
 - Durable operational event history for the deployed AgentCore runtime in a single DynamoDB table, selected with `SHIFT_STORE`, with the domain fold unchanged.
 - Decision provenance and explicit reopen: decisions and reopens are append-only, attributed (`actor` plus optional `note`/`reason`), and auditable; a reopen returns an item to conflict without touching the original decision, and both are gated by deterministic authorization that the model cannot fabricate.
-- 309 automated tests, all network-free; no credentials, accounts, or network services required.
+- 321 automated tests, all network-free; no credentials, accounts, or network services required.
 
 ## Explicitly Out of Scope
 

@@ -45,10 +45,21 @@ export function createShiftContinuityAgentCoreApp(env: NodeJS.ProcessEnv = proce
       requestSchema: createAgentCoreRequestSchema(),
       async process(request, context: RequestContext) {
         const { userText, shiftId, actor } = parseAgentCoreInvocationRequest(request);
-        const session = await sessions.get(context.sessionId || DEFAULT_SESSION);
+
+        // Shift identity is application context, not model reasoning: when the
+        // caller names a shift we hydrate exactly that shift, and when it cannot
+        // be resolved we fail explicitly instead of operating on another shift.
+        let session;
+        try {
+          session = await sessions.get(context.sessionId || DEFAULT_SESSION, shiftId);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error("AgentCore session resolution failed:", message);
+          return { result: "", ok: false, toolTrace: [], error: message };
+        }
         const envelope = await invokeAgentCoreShift({
           store: session.store,
-          shiftId: shiftId ?? session.shiftId,
+          shiftId: session.shiftId,
           userText,
           actor,
           interpreter,

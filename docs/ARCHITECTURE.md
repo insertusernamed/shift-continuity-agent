@@ -113,8 +113,14 @@ flowchart TD
   again if the append fails, so a rejected photo report leaves nothing behind.
 - **One agent, two hosts.** AgentCore Runtime hosts the same `ShiftContinuityAgent`,
   the same tools, the same domain fold, and the same decision gate. The deployment
-  entrypoint is a thin adapter: parse the request, resolve the per-session store, invoke
-  the agent, return the envelope with the tool trace.
+  entrypoint is a thin adapter: parse the request, resolve the store for the requested
+  shift, invoke the agent, return the envelope with the tool trace.
+- **Shift identity is application context, not model reasoning.** A durable deployment
+  hosts many shifts, so an invocation may name the exact shift to operate on; the runtime
+  hydrates that shift, and an unresolvable id fails explicitly instead of silently
+  falling back to another one. The ephemeral per-session store has only its own seeded
+  shift, so it refuses a selector rather than pretending to honour one. That is what
+  makes a durable deployment testable run-by-run without clearing anyone's history.
 
 ## Data flow for one report
 

@@ -12,9 +12,11 @@ import {
 } from "./agentCoreAdapter.ts";
 import { DeterministicEventInterpreter } from "../ingest/interpreter.ts";
 import { createDemoShift } from "../demo/demo.ts";
+import { seedRemoteSmokeShift, smokePreconditionProblems } from "../demo/smokeScenario.ts";
 import { canonicalClaim } from "../domain/claims.ts";
 import { InMemoryShiftStore } from "../store/inMemoryStore.ts";
 import type { ShiftStore } from "../store/jsonFileStore.ts";
+import type { AsyncShiftStore } from "../store/dynamoDbStore.ts";
 
 function seededStore(): { store: ShiftStore; shiftId: string } {
   const store = new InMemoryShiftStore((s) => {
@@ -22,6 +24,22 @@ function seededStore(): { store: ShiftStore; shiftId: string } {
   });
   const shiftId = store.listShifts()[0]!.id;
   return { store, shiftId };
+}
+
+/**
+ * Uncached durable store for tests: unlike the JSON adapter, every call sees
+ * the latest state, which is how the real DynamoDB store behaves and what makes
+ * shift targeting observable.
+ */
+class FakeDurableStore implements AsyncShiftStore {
+  private readonly inner = new InMemoryShiftStore();
+  async createShift(name: string, startedAt?: string) { return this.inner.createShift(name, startedAt); }
+  async getShift(id: string) { return this.inner.getShift(id); }
+  async listShifts() { return this.inner.listShifts(); }
+  async endShift(id: string, endedAt?: string) { return this.inner.endShift(id, endedAt); }
+  async appendEvent(event: Parameters<ShiftStore["appendEvent"]>[0]) { this.inner.appendEvent(event); }
+  async getEvents(shiftId: string) { return this.inner.getEvents(shiftId); }
+  async getShiftState(shiftId: string) { return this.inner.getShiftState(shiftId); }
 }
 
 const interpreter = new DeterministicEventInterpreter();
@@ -122,6 +140,13 @@ describe("AgentCore durable session provider", () => {
     assert.equal(a.flush, undefined, "the ephemeral store has nothing to flush");
   });
 
+  it("serves the session's own shift when no selector is supplied", async () => {
+    const provider = createAgentCoreSessionProvider({ env: {} });
+    const session = await provider.get("session-a");
+    const again = await provider.get("session-a", session.shiftId);
+    assert.equal(again.shiftId, session.shiftId, "the session's own shift is a valid selector");
+  });
+
   it("seeds the demo shift exactly once, not once per session", async () => {
     const provider = createAgentCoreSessionProvider({ env: durableEnv() });
     const a = await provider.get("session-a");
@@ -200,6 +225,94 @@ describe("AgentCore durable session provider", () => {
   it("surfaces an invalid store configuration instead of silently degrading", () => {
     assert.throws(() => createAgentCoreSessionProvider({ env: { SHIFT_STORE: "postgres" } }), /SHIFT_STORE/);
     assert.throws(() => createAgentCoreSessionProvider({ env: { SHIFT_STORE: "dynamodb" } }), /SHIFT_TABLE_NAME/);
+  });
+
+  it("hydrates an explicitly requested shift instead of the default seeded shift", async () => {
+    const durable = new FakeDurableStore();
+    const provider = createAgentCoreSessionProvider({ env: durableEnv(), durableStore: durable });
+    const fallback = await provider.get("session-1");
+    assert.equal(fallback.store.getShift(fallback.shiftId)?.name, "Night Shift (demo)");
+
+    const smoke = await seedRemoteSmokeShift(durable, "run-1", "2026-09-11T07:00:00Z");
+    const targeted = await provider.get("session-1", smoke.id);
+
+    assert.equal(targeted.shiftId, smoke.id);
+    assert.equal(targeted.store.getShift(targeted.shiftId)?.name, "remote-smoke-run-1");
+    assert.notEqual(targeted.shiftId, fallback.shiftId, "the request selector must win over the default");
+  });
+
+  it("a targeted write lands on the requested shift and never on the default shift", async () => {
+    const durable = new FakeDurableStore();
+    const provider = createAgentCoreSessionProvider({ env: durableEnv(), durableStore: durable });
+    const fallback = await provider.get("session-1");
+    const smoke = await seedRemoteSmokeShift(durable, "run-1", "2026-09-11T07:00:00Z");
+
+    const targeted = await provider.get("session-1", smoke.id);
+    const envelope = await invokeAgentCoreShift({
+      store: targeted.store,
+      shiftId: targeted.shiftId,
+      userText: "Aisle 9 is blocked.",
+      interpreter,
+      mode: "deterministic",
+    });
+    assert.equal(envelope.ok, true);
+    await targeted.flush?.();
+
+    const inSmoke = (state: Awaited<ReturnType<FakeDurableStore["getShiftState"]>>) =>
+      state?.items.some((item) => item.canonicalSubject === "aisle 9") ?? false;
+    assert.equal(inSmoke(await durable.getShiftState(smoke.id)), true);
+    assert.equal(
+      inSmoke(await durable.getShiftState(fallback.shiftId)),
+      false,
+      "the default shift must not receive another shift's events",
+    );
+  });
+
+  it("a prior run's decided shift cannot contaminate a later run's seeded shift", async () => {
+    const durable = new FakeDurableStore();
+    const provider = createAgentCoreSessionProvider({ env: durableEnv(), durableStore: durable });
+    await provider.get("session-1");
+
+    // Run 1 decides D104 and then finishes.
+    const first = await seedRemoteSmokeShift(durable, "run-1", "2026-09-11T07:00:00Z");
+    const runOne = await provider.get("session-1", first.id);
+    await invokeAgentCoreShift({
+      store: runOne.store,
+      shiftId: runOne.shiftId,
+      userText: "Send D104 to claims.",
+      actor: "Shift Supervisor",
+      interpreter,
+      mode: "deterministic",
+    });
+    await runOne.flush?.();
+    assert.equal(
+      (await durable.getShiftState(first.id))?.items.find((i) => i.canonicalSubject === "d104")?.status,
+      "decided",
+    );
+
+    // Run 2 seeds its own shift and sees the exact initial preconditions.
+    const second = await seedRemoteSmokeShift(durable, "run-2", "2026-09-11T07:01:00Z");
+    const runTwo = await provider.get("session-1", second.id);
+    const runTwoState = await durable.getShiftState(runTwo.shiftId);
+    assert.ok(runTwoState);
+    assert.deepEqual(smokePreconditionProblems(runTwoState), []);
+
+    // Run 1's history is still intact and attributed.
+    const firstDecision = (await durable.getEvents(first.id)).find((e) => e.kind === "decision_recorded");
+    assert.equal(firstDecision?.actor, "Shift Supervisor");
+  });
+
+  it("rejects an unknown requested shift instead of falling back to the default", async () => {
+    const durable = new FakeDurableStore();
+    const provider = createAgentCoreSessionProvider({ env: durableEnv(), durableStore: durable });
+    await provider.get("session-1");
+
+    await assert.rejects(() => provider.get("session-1", "no-such-shift"), /unknown shift/i);
+  });
+
+  it("refuses a shift selector in ephemeral mode rather than silently ignoring it", async () => {
+    const provider = createAgentCoreSessionProvider({ env: {} });
+    await assert.rejects(() => provider.get("session-a", "any-shift"), /durable/i);
   });
 });
 
