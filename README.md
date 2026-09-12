@@ -96,13 +96,19 @@ LLM_MODEL=...
 
 Beyond the deterministic UI paths, the server can expose a **Strands Agents SDK
 agent** (`ShiftContinuityAgent`, `@strands-agents/sdk`) that orchestrates the
-system through four typed tools: `report_event`, `get_shift_state`, `get_handoff`,
-and `record_human_decision`. Every tool wraps an existing application service;
-all state changes still flow through append-only events and the deterministic
-fold. The agent decides *which tool to call*; the domain decides *what is true*.
-It cannot resolve conflicts itself: `record_human_decision` refuses any call that
-does not carry an explicit human-selected claim, so on a conflict the agent can
-only surface the options and ask a human to choose.
+system through five typed tools: `report_event`, `get_shift_state`, `get_handoff`,
+`record_human_decision`, and `reopen_human_decision`. Every tool wraps an existing
+application service; all state changes still flow through append-only events and
+the deterministic fold. The agent decides *which tool to call*; the domain decides
+*what is true*.
+
+It cannot resolve conflicts or undo decisions itself. `record_human_decision`
+refuses any call that does not carry an explicit human-selected claim, and
+`reopen_human_decision` refuses any call that does not carry an explicit human
+request naming the item — so on a conflict the agent can only surface the options
+and ask a human to choose. Who is acting (`actor`) and why (`note`/`reason`) come
+from the application's human context, never from the model: the reopen tool takes
+no actor argument at all, so it cannot fabricate one.
 
 Requirements for Strands mode: Node.js 22+, AWS credentials available through
 the normal AWS credential chain (e.g. `AWS_PROFILE`), and:
@@ -181,8 +187,13 @@ In the UI: **Load Demo Shift** seeds the Phase 6 scenario; **Report** takes a pl
 report or a photo plus note, and (behind the disclosure) an exact structured event;
 **Current State** marks each item OPEN / RESOLVED / CONFLICT / DECIDED, with a
 **Human decision** button per reported claim on conflicted items (recording one flips the
-item to DECIDED and removes it from the handoff's human-review section); the agent panel
-shows the reply and the tool trace for every turn; **End Shift** freezes the shift.
+item to DECIDED, attributes it to whoever is named in **Acting as**, and removes it from
+the handoff's human-review section). A decided item shows its decision, actor and note
+plus a labelled **Reopen decision** action with an optional reason; reopening returns the
+item to CONFLICT and puts it back under human review. Decision and reopen buttons are
+disabled while a request is in flight, so a double click cannot record the same human
+action twice. The agent panel shows the reply and the tool trace for every turn;
+**End Shift** freezes the shift.
 `?present=1` (or the **Presentation view** button) hides the shift admin and manual
 editor for recording and screenshots.
 
@@ -435,10 +446,25 @@ Events fold, in `occurredAt` order, into **operational items**:
 A conflict is closed by a human, never by the system: recording a decision on a
 conflicted item appends an ordinary `decision_recorded` event through the normal
 store path. The decision is validated against the current folded state (item
-exists, is conflicted, chosen claim is one of the conflicting canonical claims)
-and is final — later decision events and late contradictory reports stay in
-history but cannot reopen the item. Decisions are only accepted through the
-dedicated endpoint, never through the generic event path.
+exists, is conflicted, chosen claim is one of the conflicting canonical claims).
+Ordinary reports can never undo it: later claims and later decision events stay in
+history without changing the item.
+
+The one way back out of `decided` is an explicit, attributed **reopen**.
+`decision_reopened` is appended — never an edit or a delete — the item returns to
+`conflicted` with its original competing claims, and the superseded decision stays
+visible on the item and in history until a new human decision settles it. Only a
+currently `decided` item may be reopened, only a named human may ask for it, and a
+second reopen without an intervening decision is refused. Decisions and reopens are
+only accepted through their dedicated endpoints, never through the generic event
+path.
+
+**Provenance.** Both human actions carry who authorized them — `actor` (a display
+identity such as `Shift Supervisor`) and an optional `note`/`reason`. Both live on
+the event itself, so the audit trail is append-only like everything else and
+survives persistence unchanged; the history view and the item cards both show them.
+`actor` is optional in the schema so decisions recorded before provenance existed
+remain readable.
 
 The LLM (or rule-based interpreter) is an **interpreter, not the source of truth**:
 `natural language → structured extraction → schema validation → deterministic domain engine → state`.
@@ -453,13 +479,14 @@ so the system fully works with no LLM configured.
 - Seeded demo scenario (`POST /api/demo-shift`) matching the Phase 6 expectation.
 - Natural-language ingestion behind `EventInterpreter` with a deterministic baseline interpreter that refuses to guess on unparseable input.
 - Optional real LLM interpreter (`LLMEventInterpreter` over an `OpenAiCompatibleClient`, env-configured, provider-neutral `LlmClient` boundary) with strict local schema validation of model output.
-- Local Strands integration: one `ShiftContinuityAgent` (`@strands-agents/sdk`) orchestrating the deterministic system through four typed tools, with an offline deterministic runner as fallback and per-invocation tool traces for demos. Explicit provider selection (`AGENT_MODEL_PROVIDER`): `bedrock` (Nova via `BedrockModel` Converse, `ca.amazon.nova-lite-v1:0` by default) or `bedrock-openai` (GPT-5.6 Luna via the SDK's OpenAI Responses model on the bedrock-runtime OpenAI-compatible endpoint, `global.openai.gpt-5.6-luna` by default), both authenticated through the normal AWS credential chain.
+- Local Strands integration: one `ShiftContinuityAgent` (`@strands-agents/sdk`) orchestrating the deterministic system through five typed tools, with an offline deterministic runner as fallback and per-invocation tool traces for demos. Explicit provider selection (`AGENT_MODEL_PROVIDER`): `bedrock` (Nova via `BedrockModel` Converse, `ca.amazon.nova-lite-v1:0` by default) or `bedrock-openai` (GPT-5.6 Luna via the SDK's OpenAI Responses model on the bedrock-runtime OpenAI-compatible endpoint, `global.openai.gpt-5.6-luna` by default), both authenticated through the normal AWS credential chain.
 - Deterministic normalization to cut false conflicts: subject canonicalization (configured aliases + narrow `"damaged case D104" → "d104"` shape) and claim normalization (explicit disposition vocabulary, unknown claims kept as normalized raw text).
 - Photo evidence: an image plus a note can be attached to a report; the note rides the normal interpretation/validation pipeline while the image is stored locally (`EvidenceStore`) and shown as evidence on the event in history. No model sees the pixels.
 - AgentCore deployment: the same Strands agent hosted on Amazon Bedrock AgentCore Runtime (CodeZip, `ca-central-1`), invoked through the AgentCore `/invocations` protocol with a JSON envelope carrying the agent response, tool trace, and resulting state; per-session in-memory state (see the AgentCore persistence limitation above).
 - Demo/presentation readiness: seeded demo shift, a presentation view, a demo-flow guide in the header, a reset/seed script, and a headless-Chrome screenshot script producing `docs/stills/`.
 - Durable operational event history for the deployed AgentCore runtime in a single DynamoDB table, selected with `SHIFT_STORE`, with the domain fold unchanged.
-- 254 automated tests, all network-free; no credentials, accounts, or network services required.
+- Decision provenance and explicit reopen: decisions and reopens are append-only, attributed (`actor` plus optional `note`/`reason`), and auditable; a reopen returns an item to conflict without touching the original decision, and both are gated by deterministic authorization that the model cannot fabricate.
+- 309 automated tests, all network-free; no credentials, accounts, or network services required.
 
 ## Explicitly Out of Scope
 
@@ -468,7 +495,8 @@ table (queues, Lambda, API Gateway, Cognito, application S3 storage, AgentCore
 Memory/Gateway, DynamoDB streams/TTL/backups),
 production-grade data operations (multi-region replication, point-in-time recovery,
 migrations, retention policy), authentication, user accounts, organizations,
-role-based access, mobile apps,
+role-based access, verified identity (the decision `actor` is a client-supplied
+display string, so it is an audit annotation and not proof of who acted), mobile apps,
 SMS/email/Slack/Teams integration, voice recording, production databases,
 Docker/Kubernetes, metrics/observability platforms, branding, billing, multi-tenancy,
 sophisticated permissions, multiple cooperating agents, agent memory services, CI/CD,
@@ -537,8 +565,9 @@ conflict visibility, noise omission, chronology, history retention).
 | `POST /api/shifts/:id/events/nl` | natural-language report → validated event |
 | `POST /api/shifts/:id/events/photo` | photo + note report `{ note, image, contentType, fileName? }` → validated event with evidence metadata |
 | `GET /api/shifts/:id/evidence/:evidenceId` | the stored evidence image bytes |
-| `POST /api/shifts/:id/agent` | send a message to the Strands agent `{ message }` → response + tool trace |
-| `POST /api/shifts/:id/items/:subject/decision` | record a human decision `{ claim }` on a conflicted item |
+| `POST /api/shifts/:id/agent` | send a message to the Strands agent `{ message, actor? }` → response + tool trace (`actor` is the identity recorded on any human action the turn performs) |
+| `POST /api/shifts/:id/items/:subject/decision` | record a human decision `{ claim, actor?, note? }` on a conflicted item |
+| `POST /api/shifts/:id/items/:subject/reopen` | append a reopen `{ actor, reason? }` for a currently decided item |
 | `POST /api/shifts/:id/end` | end shift (blocks further events) |
 | `POST /api/demo-shift` | seed the demo scenario |
 
@@ -556,3 +585,8 @@ configured. In every failure case nothing is persisted **and** no image file is 
 a claim outside the conflicting options, `404` for an unknown item, `409` when the
 item is not conflicted or was already decided (with a machine-readable `code`),
 `409` for an ended shift. Rejected decisions never mutate state.
+
+`POST .../items/:subject/reopen` failure modes: `400` (`missing_actor`) when no actor is
+supplied, `404` for an unknown item, `409` (`item_not_decided`) when the item is not
+currently decided, `409` for an ended shift. A refused reopen appends nothing:
+the item and its history are untouched.

@@ -309,6 +309,9 @@ export function renderUi(): string {
   /* ---- Agent ---- */
   .agent-form { display: flex; gap: var(--space-3); align-items: flex-end; flex-wrap: wrap; }
   .agent-form .field { flex: 1 1 16rem; }
+  /* The acting identity is short and fixed-width enough not to compete with the
+     message field, and it stays visible in presentation view. */
+  .agent-form .field--actor { flex: 0 1 12rem; }
   .reply {
     margin: var(--space-4) 0 0; padding: var(--space-1) 0 var(--space-1) var(--space-3);
     border-left: 3px solid var(--accent); font-size: 1rem; color: var(--ink-1);
@@ -387,6 +390,11 @@ export function renderUi(): string {
     font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.09em;
     text-transform: uppercase; color: var(--ink-3); margin-right: var(--space-2);
   }
+  /* A decision shown on a conflicted item is one a human reopened, so it is
+     labelled as superseded rather than presented as current truth. */
+  .card__decision--superseded span { color: var(--conflict-ink); }
+  .card__provenance { margin: 2px 0 0; font-size: 0.85rem; color: var(--ink-2); }
+  .card__provenance b { color: var(--ink-1); font-weight: 600; }
   .card__blocked { margin: var(--space-2) 0 0; font-size: 0.82rem; color: var(--ink-3); }
   .review {
     margin-top: var(--space-3); padding: var(--space-3);
@@ -398,8 +406,24 @@ export function renderUi(): string {
     font-size: 0.86rem; font-weight: 650; color: var(--conflict-ink);
   }
   .review__hint { margin: 4px 0 var(--space-3); font-size: 0.83rem; color: var(--ink-2); }
-  .review__choices { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+  .review__choices { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: flex-end; }
+  .review__choices .field { flex: 1 1 13rem; }
+  /* Reopening is the inverse of deciding, so it borrows the review layout with
+     the decided palette: it reads as part of the same audit surface. */
+  .review--decided { border-color: var(--decided-line); }
+  .review--decided .review__title { color: var(--decided-ink); }
   .empty { margin: 0; font-size: 0.88rem; color: var(--ink-3); }
+
+  /* Mutation feedback. Stays rendered while empty (a display:none live region
+     is not reliably announced) but collapses to zero height. */
+  .mutation {
+    margin: 0; padding: 0 0 0 var(--space-3); border-left: 3px solid transparent;
+    font-size: 0.88rem; font-weight: 550; color: var(--ink-1);
+  }
+  .mutation:not(:empty) { margin-top: var(--space-3); border-left-color: var(--accent); }
+
+  /* In-flight feedback: a second click cannot submit the same human action. */
+  .btn[aria-busy="true"] { cursor: progress; opacity: 0.65; }
 
   /* ---- Handoff ---- */
   .handoff { display: grid; gap: var(--space-4); }
@@ -445,6 +469,7 @@ export function renderUi(): string {
     text-transform: uppercase; color: var(--ink-3); margin-left: var(--space-2);
   }
   .event__desc { margin: 2px 0 0; font-size: 0.88rem; color: var(--ink-2); overflow-wrap: anywhere; }
+  .event__desc b { color: var(--ink-1); font-weight: 600; }
 
   .evidence {
     margin: var(--space-3) 0 0; padding: var(--space-3);
@@ -537,7 +562,8 @@ export function renderUi(): string {
           <li><em>Load demo shift</em> seeds a night shift as real events.</li>
           <li><em>Current state</em> shows routine issues already resolved and D104 conflicting.</li>
           <li>Ask the agent <em>“What should we do with D104?”</em> — it refuses to decide and asks for a human.</li>
-          <li>Record the human decision on D104 (or ask for it explicitly) — the item becomes decided.</li>
+          <li>Record the human decision on D104 (or ask for it explicitly) — the item becomes decided, attributed to whoever is named in <em>Acting as</em>.</li>
+          <li>Optional: <em>Reopen decision</em> on D104 with a reason — it returns to conflict, and the original decision stays in history.</li>
           <li><em>Handoff</em> collapses to the one thing still open: the missed freezer inspection.</li>
         </ol>
       </details>
@@ -552,15 +578,19 @@ export function renderUi(): string {
         </div>
         <div class="panel__body">
           <form id="agentForm" class="agent-form">
+            <span class="field field--actor">
+              <label class="field__label" for="actor">Acting as</label>
+              <input id="actor" type="text" value="Shift Supervisor" autocomplete="off">
+            </span>
             <span class="field">
               <label class="field__label" for="agentText">Message</label>
               <input id="agentText" type="text" placeholder="Aisle 7 is blocked. / What does the morning shift need to know?" autocomplete="off">
             </span>
             <button id="agentBtn" class="btn btn--primary" type="submit">Send</button>
           </form>
+          <p class="agent-note">Whoever is named here is recorded as the actor on any decision or reopen this turn makes — nothing is attributed without it. Every turn is a tool call against the deterministic engine; the trace below shows which tool ran and whether it succeeded.</p>
           <p id="agentReply" class="reply" hidden aria-live="polite"></p>
           <div id="agentTrace" class="trace" hidden aria-live="polite"></div>
-          <p class="agent-note">Every turn is a tool call against the deterministic engine above. The trace shows which tool ran and whether it succeeded.</p>
         </div>
       </section>
 
@@ -666,6 +696,7 @@ export function renderUi(): string {
         </div>
         <div class="panel__body">
           <div id="stateList" class="cards"></div>
+          <p id="mutationResult" class="mutation" role="status" aria-live="polite"></p>
         </div>
       </section>
 
@@ -743,11 +774,16 @@ async function loadShift() {
 
 function renderEvent(event) {
   const claim = event.claim ? \` · claim: <span class="claims__value">\${esc(event.claim)}</span>\` : "";
+  // Human actions carry who authorized them and why; the append-only log is
+  // only an audit trail if that attribution is visible in it.
+  const provenance = event.actor || event.note
+    ? \` · \${event.actor ? \`by <b>\${esc(event.actor)}</b>\` : "attributed"}\${event.note ? \` — “\${esc(event.note)}”\` : ""}\`
+    : "";
   return \`<li>
     <time datetime="\${esc(event.occurredAt)}">\${fmt(event.occurredAt)}</time>
     <div>
       <p class="event__head">\${esc(event.subject)}<span class="event__kind">\${esc(event.kind)}</span></p>
-      <p class="event__desc">\${esc(event.description)}\${claim}</p>
+      <p class="event__desc">\${esc(event.description)}\${claim}\${provenance}</p>
       \${renderEvidence(event)}
     </div>
   </li>\`;
@@ -781,8 +817,14 @@ function itemCard(item) {
         .map((c) => \`<li><span class="claims__value">\${esc(c.value)}</span><span class="claims__time">\${fmt(c.occurredAt)}</span></li>\`)
         .join("")}</ul>\`
     : "";
+  // A decision shown on a conflicted item is one a human reopened: it stays on
+  // the record, but it is labelled as superseded rather than as current truth.
+  const superseded = Boolean(item.status === "conflicted" && item.decision);
   const decision = item.decision
-    ? \`<p class="card__decision"><span>Decision</span>\${esc(item.decision.value)}</p>\`
+    ? \`<p class="card__decision\${superseded ? " card__decision--superseded" : ""}"><span>\${superseded ? "Reopened" : "Decision"}</span>\${esc(item.decision.value)}</p>\`
+    : "";
+  const provenance = item.reopened ? reopenProvenanceLine(item) : item.decision && (item.decision.actor || item.decision.note)
+    ? \`<p class="card__provenance\">\${item.decision.actor ? \`Recorded by <b>\${esc(item.decision.actor)}</b>\` : "Recorded"}\${item.decision.note ? \` — “\${esc(item.decision.note)}”\` : ""}</p>\`
     : "";
   // One button per distinct canonical claim: the human picks between what was
   // actually reported — the system never invents options for them.
@@ -796,8 +838,23 @@ function itemCard(item) {
   const review = item.status === "conflicted" && choices
     ? \`<div class="review" role="group" aria-label="Record a human decision for \${esc(item.subject)}">
         <p class="review__title">\${STATUS_ICONS.conflicted}Human decision required</p>
-        <p class="review__hint">The agent will not choose for you. Pick the outcome that is actually true.</p>
+        <p class="review__hint">\${superseded ? "The previous decision was reopened, so this needs a new human choice." : "The agent will not choose for you. Pick the outcome that is actually true."}</p>
         <div class="review__choices">\${choices}</div>
+      </div>\`
+    : "";
+  // Reopening is a human action with the same authority as deciding, so it is
+  // offered only on a currently decided item and always sends the named actor.
+  const reopen = item.status === "decided"
+    ? \`<div class="review review--decided" role="group" aria-label="Reopen the decision for \${esc(item.subject)}">
+        <p class="review__title">\${STATUS_ICONS.decided}Decision recorded by a human</p>
+        <p class="review__hint">If that decision was wrong, reopen it. Nothing is deleted: the decision stays in history and the item returns to conflict.</p>
+        <div class="review__choices">
+          <span class="field">
+            <label class="field__label" for="reopenReason-\${safeId(item.canonicalSubject)}">Reason (optional)</label>
+            <input id="reopenReason-\${safeId(item.canonicalSubject)}" type="text" placeholder="Claims ticket was created in error" autocomplete="off">
+          </span>
+          <button type="button" class="btn reopenBtn" data-item="\${esc(item.canonicalSubject)}">Reopen decision</button>
+        </div>
       </div>\`
     : "";
   const blocked = item.blockedByCanonicalSubject
@@ -810,7 +867,7 @@ function itemCard(item) {
       \${chip(item.status)}
     </div>
     <p class="card__desc">\${esc(item.description)}</p>
-    \${claims}\${decision}\${blocked}\${review}
+    \${claims}\${decision}\${provenance}\${blocked}\${review}\${reopen}
   </article>\`;
 }
 
@@ -843,6 +900,32 @@ function renderHandoff(handoff) {
 }
 
 function fmt(iso) { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+function safeId(value) { return String(value).replace(/[^a-z0-9]+/gi, "-"); }
+/**
+ * Attribution for a reopened decision: who undid it, and why. This is shown
+ * instead of the decision's own provenance, because the reopen is the human
+ * action that put the item back into conflict.
+ */
+function reopenProvenanceLine(item) {
+  return \`<p class="card__provenance">Reopened by <b>\${esc(item.reopened.actor || "an unnamed human")}</b>\${item.reopened.note ? \` — “\${esc(item.reopened.note)}”\` : ""}</p>\`;
+}
+/** The acting identity the client records on any human action in this session. */
+function currentActor() { return $("actor").value.trim(); }
+
+/**
+ * Disable the given buttons for the duration of a mutation. Human actions are
+ * single-shot: a double click must not append the same decision twice, and the
+ * disabled state is the visible proof that the request is in flight.
+ */
+async function withBusy(buttons, work) {
+  const list = buttons.filter(Boolean);
+  list.forEach((button) => { button.disabled = true; button.setAttribute("aria-busy", "true"); });
+  try {
+    return await work();
+  } finally {
+    list.forEach((button) => { button.disabled = false; button.removeAttribute("aria-busy"); });
+  }
+}
 function esc(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -903,18 +986,37 @@ $("presentBtn").addEventListener("click", () => {
   window.history.replaceState({}, "", url);
 });
 
-// Decision buttons on conflicted items (event delegation: cards re-render).
+// Human-authority actions on items — deciding a conflict and reopening a
+// decision. Delegated because the cards are re-rendered after every change.
 $("stateList").addEventListener("click", async (e) => {
-  const btn = e.target.closest(".decisionBtn");
-  if (!btn) return;
+  const decisionBtn = e.target.closest(".decisionBtn");
+  const reopenBtn = e.target.closest(".reopenBtn");
+  if ((!decisionBtn && !reopenBtn) || !currentShift) return;
   showError("");
-  try {
-    await api(\`/api/shifts/\${currentShift.id}/items/\${encodeURIComponent(btn.dataset.item)}/decision\`, {
-      method: "POST",
-      body: JSON.stringify({ claim: btn.dataset.claim }),
-    });
-    await loadShift();
-  } catch (err) { showError(err.message); }
+  $("mutationResult").textContent = "";
+  const item = (decisionBtn || reopenBtn).dataset.item;
+  // Every human action on the board is locked while one is in flight, so two
+  // clicks cannot append two decisions for the same item.
+  const peers = Array.from(document.querySelectorAll(".decisionBtn, .reopenBtn"));
+  await withBusy(peers, async () => {
+    try {
+      if (decisionBtn) {
+        const result = await api(\`/api/shifts/\${currentShift.id}/items/\${encodeURIComponent(item)}/decision\`, {
+          method: "POST",
+          body: JSON.stringify({ claim: decisionBtn.dataset.claim, actor: currentActor() }),
+        });
+        $("mutationResult").textContent = \`Decision recorded: \${result.item.subject} is decided as \${result.item.decision.value}.\`;
+      } else {
+        const reason = document.getElementById("reopenReason-" + safeId(item));
+        const result = await api(\`/api/shifts/\${currentShift.id}/items/\${encodeURIComponent(item)}/reopen\`, {
+          method: "POST",
+          body: JSON.stringify({ actor: currentActor(), reason: reason ? reason.value : "" }),
+        });
+        $("mutationResult").textContent = \`Decision reopened: \${result.item.subject} is conflicted again and needs a new human decision.\`;
+      }
+      await loadShift();
+    } catch (err) { showError(err.message); }
+  });
 });
 
 $("photoFile").addEventListener("change", () => {
@@ -940,6 +1042,7 @@ $("photoForm").addEventListener("submit", async (e) => {
   if (!file) { showError("Choose an image first."); return; }
   const note = $("photoNote").value.trim();
   if (!note) { showError("Add a short note so the report can be interpreted."); return; }
+  await withBusy([$("photoBtn")], async () => {
   try {
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -958,12 +1061,14 @@ $("photoForm").addEventListener("submit", async (e) => {
     $("photoPreviewText").textContent = "";
     await loadShift();
   } catch (err) { showError(err.message); }
+  });
 });
 
 $("nlForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   showError("");
   $("nlResult").textContent = "";
+  await withBusy([$("nlBtn")], async () => {
   try {
     const event = await api(\`/api/shifts/\${currentShift.id}/events/nl\`, {
       method: "POST",
@@ -974,6 +1079,7 @@ $("nlForm").addEventListener("submit", async (e) => {
     $("nlText").value = "";
     await loadShift();
   } catch (err) { showError(err.message); }
+  });
 });
 
 $("agentForm").addEventListener("submit", async (e) => {
@@ -983,10 +1089,11 @@ $("agentForm").addEventListener("submit", async (e) => {
   $("agentTrace").hidden = true;
   const text = $("agentText").value.trim();
   if (!text || !currentShift) return;
+  await withBusy([$("agentBtn")], async () => {
   try {
     const result = await api(\`/api/shifts/\${currentShift.id}/agent\`, {
       method: "POST",
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, actor: currentActor() }),
     });
     $("agentReply").innerHTML = \`<span class="reply__label">Agent reply</span>\${esc(result.response || "")}\`;
     $("agentReply").hidden = false;
@@ -1008,6 +1115,7 @@ $("agentForm").addEventListener("submit", async (e) => {
     $("agentText").value = "";
     await loadShift();
   } catch (err) { showError(err.message); }
+  });
 });
 
 $("endBtn").addEventListener("click", async () => {

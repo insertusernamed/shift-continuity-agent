@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { JsonFileShiftStore } from "../store/jsonFileStore.ts";
 import { DeterministicEventInterpreter, ProviderError, type EventInterpreter } from "../ingest/interpreter.ts";
 import { validateEvent } from "../domain/validate.ts";
-import { createShiftContinuityTools, type HumanDecisionAuthorization } from "./tools.ts";
+import { createShiftContinuityTools, type HumanDecisionAuthorization, type ReopenAuthorization } from "./tools.ts";
 
 let temporaryDirectories: string[] = [];
 
@@ -46,13 +46,33 @@ function seedConflict(store: JsonFileShiftStore, shiftId: string): void {
   }));
 }
 
-function authorizedDecision(subject: string, claim: string): HumanDecisionAuthorization {
+function authorizedDecision(subject: string, claim: string, actor?: string): HumanDecisionAuthorization {
   return {
     subject,
     canonicalSubject: "d104",
     claim,
     canonicalClaim: claim === "claims" ? "claims" : "discard",
+    ...(actor ? { actor } : {}),
   };
+}
+
+function authorizedReopen(actor: string, reason?: string): ReopenAuthorization {
+  return { subject: "D104", canonicalSubject: "d104", actor, ...(reason ? { reason } : {}) };
+}
+
+/** D104 decided "claims" by a named human, on top of the two conflicting claims. */
+function seedDecidedDecision(store: JsonFileShiftStore, shiftId: string, actor = "Shift Supervisor"): void {
+  store.appendEvent(validateEvent({
+    id: "decision-1",
+    shiftId,
+    occurredAt: "2026-09-08T05:40:00Z",
+    kind: "decision_recorded",
+    subject: "damaged case D104",
+    description: "human decision",
+    claim: "send to claims",
+    source: "human",
+    actor,
+  }));
 }
 
 describe("ShiftContinuity tools", () => {
@@ -159,5 +179,114 @@ describe("ShiftContinuity tools", () => {
     assert.match(result.error.message, /provider failed/i);
     assert.equal(store.getEvents(shift.id).length, 0);
     assert.equal(tools.getTrace()[0]?.status, "error");
+  });
+});
+
+describe("decision provenance comes from the application context, not the model", () => {
+  it("attributes a decision to the actor supplied by the caller", async () => {
+    const { store, shift } = makeStore();
+    seedConflict(store, shift.id);
+    const tools = createShiftContinuityTools({
+      store,
+      shiftId: shift.id,
+      interpreter: new DeterministicEventInterpreter(),
+      now: () => "2026-09-08T05:40:00Z",
+    });
+
+    const result = await tools.recordHumanDecision.invoke(
+      { subject: "D104", claim: "claims" },
+      { invocationState: { humanDecisionAuthorization: authorizedDecision("D104", "claims", "Shift Supervisor") } } as never,
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.event.actor, "Shift Supervisor");
+    assert.equal(result.item.decision?.actor, "Shift Supervisor");
+  });
+
+  it("leaves provenance absent when the caller supplies none (no inventing an actor)", async () => {
+    const { store, shift } = makeStore();
+    seedConflict(store, shift.id);
+    const tools = createShiftContinuityTools({ store, shiftId: shift.id, interpreter: new DeterministicEventInterpreter() });
+
+    const result = await tools.recordHumanDecision.invoke(
+      { subject: "D104", claim: "claims" },
+      { invocationState: { humanDecisionAuthorization: authorizedDecision("D104", "claims") } } as never,
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.event.actor, undefined);
+  });
+});
+
+describe("reopen_human_decision", () => {
+  it("refuses to reopen without explicit human authorization, and mutates nothing", async () => {
+    const { store, shift } = makeStore();
+    seedConflict(store, shift.id);
+    seedDecidedDecision(store, shift.id);
+    const tools = createShiftContinuityTools({ store, shiftId: shift.id, interpreter: new DeterministicEventInterpreter() });
+
+    const refusal = await tools.reopenHumanDecision.invoke({ subject: "D104" });
+
+    assert.equal(refusal.ok, false);
+    assert.equal(refusal.error.code, "human_authorization_required");
+    assert.equal(store.getEvents(shift.id).length, 3, "no event may be appended by a refused reopen");
+    assert.equal(store.getShiftState(shift.id)?.items[0]?.status, "decided");
+    assert.equal(tools.getTrace().at(-1)?.tool, "reopen_human_decision");
+  });
+
+  it("reopens a decided item when a human explicitly authorized it, keeping the prior decision", async () => {
+    const { store, shift } = makeStore();
+    seedConflict(store, shift.id);
+    seedDecidedDecision(store, shift.id);
+    const tools = createShiftContinuityTools({
+      store,
+      shiftId: shift.id,
+      interpreter: new DeterministicEventInterpreter(),
+      now: () => "2026-09-08T06:05:00Z",
+    });
+
+    const result = await tools.reopenHumanDecision.invoke(
+      { subject: "D104" },
+      { invocationState: { reopenAuthorization: authorizedReopen("Shift Supervisor", "Claims ticket was created in error") } } as never,
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.event.kind, "decision_reopened");
+    assert.equal(result.event.actor, "Shift Supervisor");
+    assert.equal(result.event.note, "Claims ticket was created in error");
+    assert.equal(result.item.status, "conflicted");
+    assert.equal(result.item.decision?.canonicalValue, "claims", "the superseded decision stays on the item");
+    assert.equal(store.getShiftState(shift.id)?.items[0]?.status, "conflicted");
+  });
+
+  it("refuses to reopen an item that is only conflicted, even with authorization", async () => {
+    const { store, shift } = makeStore();
+    seedConflict(store, shift.id);
+    const tools = createShiftContinuityTools({ store, shiftId: shift.id, interpreter: new DeterministicEventInterpreter() });
+
+    const result = await tools.reopenHumanDecision.invoke(
+      { subject: "D104" },
+      { invocationState: { reopenAuthorization: authorizedReopen("Shift Supervisor") } } as never,
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "item_not_decided");
+    assert.equal(store.getEvents(shift.id).length, 2);
+  });
+
+  it("ignores a reopen authorization for a different subject", async () => {
+    const { store, shift } = makeStore();
+    seedConflict(store, shift.id);
+    seedDecidedDecision(store, shift.id);
+    const tools = createShiftContinuityTools({ store, shiftId: shift.id, interpreter: new DeterministicEventInterpreter() });
+
+    const result = await tools.reopenHumanDecision.invoke(
+      { subject: "pallet 83" },
+      { invocationState: { reopenAuthorization: authorizedReopen("Shift Supervisor") } } as never,
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "human_authorization_required");
+    assert.equal(store.getEvents(shift.id).length, 3);
   });
 });

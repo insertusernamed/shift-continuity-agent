@@ -19,7 +19,7 @@ flowchart TD
   subgraph agent["Strands agent (src/agent)"]
     SCA["ShiftContinuityAgent<br/>@strands-agents/sdk"]
     ROUTE["requestRouting<br/>deterministic classification + authorization"]
-    TOOLS["Typed tools<br/>report_event · get_shift_state · get_handoff · record_human_decision"]
+    TOOLS["Typed tools<br/>report_event · get_shift_state · get_handoff · record_human_decision · reopen_human_decision"]
     MODEL["Model provider<br/>AGENT_MODEL_PROVIDER=bedrock | bedrock-openai"]
   end
 
@@ -34,7 +34,7 @@ flowchart TD
     VALIDATE["validateEvent"]
     FOLD["Chronological fold → operational items"]
     HANDOFF["buildHandoff"]
-    DECIDE["recordableDecision<br/>authorization gate"]
+    DECIDE["recordableDecision / reopenableDecision<br/>human-authority gates"]
   end
 
   subgraph data["Storage behind narrow interfaces (src/store)"]
@@ -84,11 +84,17 @@ flowchart TD
   application service (`ingestNaturalLanguageReport`, `getShiftState`, `buildHandoff`,
   `recordableDecision`). The agent therefore cannot invent current state — if it wants to
   know something, it has to ask the deterministic engine.
-- **Authorization is model-independent.** Explicit human-decision phrasings are detected
-  deterministically from the current request (`src/agent/requestRouting.ts`) and populate
-  `invocationState` before the model runs. The `record_human_decision` tool re-checks
-  that authorization itself, so a model that tries to decide a conflict on its own is
-  refused. There is no path where the LLM fabricates human authority.
+- **Authorization is model-independent.** Explicit human-action phrasings — selecting a
+  claim, or asking to reopen a named decision — are detected deterministically from the
+  current request (`src/agent/requestRouting.ts`) and populate `invocationState` before the
+  model runs. The `record_human_decision` and `reopen_human_decision` tools re-check that
+  authorization themselves, so a model that tries to decide a conflict or undo a decision
+  on its own is refused. There is no path where the LLM fabricates human authority.
+- **Attribution is application context, not model output.** The acting human (`actor`) and
+  the optional `note`/`reason` are supplied by the caller (the UI's *Acting as* field, or
+  the client's `actor` field on an AgentCore invocation). `reopen_human_decision` accepts
+  no actor argument at all, so a model physically cannot invent who authorized an undo;
+  the value rides the event and is therefore part of the append-only audit trail.
 - **Storage is behind narrow interfaces.** `ShiftStore` has three implementations: JSON
   file (local app), in-memory (per-session, ephemeral), and DynamoDB (durable, deployed
   AgentCore runtime). The domain only ever sees the synchronous interface, so it cannot
@@ -152,9 +158,31 @@ sequenceDiagram
   A->>G: (if it tried) subject+claim with no invocationState authorization
   G-->>A: refused — nothing appended
   U->>A: "Send D104 to claims"
-  Note over A: deterministic routing sets authorization for subject+claim
+  Note over A: deterministic routing sets authorization for subject+claim+actor
   A->>G: record_human_decision(D104, claims)
-  G->>S: append decision_recorded (validated against folded state)
+  G->>S: append decision_recorded (validated against folded state, actor attached)
   S-->>A: item decided
   A-->>U: D104 decided; handoff no longer lists it for review
+```
+
+Reopen case — a decision is undone by appending, never by editing:
+
+```mermaid
+sequenceDiagram
+  participant U as Shift Supervisor
+  participant A as Strands agent
+  participant R as reopen_human_decision (gate)
+  participant S as ShiftStore
+  participant F as fold
+
+  U->>A: "What happened with D104?"
+  Note over A: a question is not an instruction to reopen
+  U->>A: "Reopen D104 because the disposal record was wrong"
+  Note over A: deterministic routing authorizes subject + reason<br/>and attaches the actor from the application context
+  A->>R: reopen_human_decision(D104)
+  R->>S: append decision_reopened (only if the item is currently decided)
+  S->>F: fold
+  F-->>A: item conflicted again; superseded decision retained
+  A-->>U: D104 needs a new human decision; handoff lists it for review
+  Note over R: the tool takes no actor argument —<br/>the model cannot invent who authorized the undo
 ```

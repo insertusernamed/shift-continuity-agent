@@ -10,7 +10,7 @@ import {
 import { InMemoryShiftStore } from "./inMemoryStore.ts";
 import { StoreError } from "./jsonFileStore.ts";
 import { validateEvent } from "../domain/validate.ts";
-import { recordableDecision } from "../domain/decide.ts";
+import { recordableDecision, reopenableDecision } from "../domain/decide.ts";
 import { createDemoShift } from "../demo/demo.ts";
 import type { OperationalEvent } from "../domain/types.ts";
 
@@ -252,5 +252,73 @@ describe("DynamoDbShiftStore", () => {
     assert.deepEqual(event?.evidence, [
       { id: "ev-1", fileName: "aisle12-blocked.png", contentType: "image/png", note: "Aisle 12 is blocked." },
     ]);
+  });
+
+  it("preserves decision provenance through the wire round-trip", async () => {
+    const shift = await store.createShift("Night Shift");
+    await store.appendEvent(makeEvent(shift.id, { occurredAt: "2026-09-08T05:02:00Z", kind: "status_claimed", subject: "damaged case D104", claim: "send to claims" }));
+    await store.appendEvent(makeEvent(shift.id, { id: "claim-2", occurredAt: "2026-09-08T05:14:00Z", kind: "status_claimed", subject: "D104", claim: "discarded" }));
+    const state = await store.getShiftState(shift.id);
+    await store.appendEvent(
+      recordableDecision({
+        state: state!,
+        subject: "D104",
+        claim: "send to claims",
+        actor: "Shift Supervisor",
+        note: "scanner label was correct",
+        eventId: "decision-1",
+        occurredAt: "2026-09-08T05:40:00Z",
+      }),
+    );
+
+    const coldStart = new DynamoDbShiftStore(port, "shift-events");
+    const [decision] = (await coldStart.getEvents(shift.id)).filter((e) => e.kind === "decision_recorded");
+    assert.equal(decision?.actor, "Shift Supervisor");
+    assert.equal(decision?.note, "scanner label was correct");
+    const reloaded = await coldStart.getShiftState(shift.id);
+    assert.equal(reloaded?.items[0]?.status, "decided");
+    assert.equal(reloaded?.items[0]?.decision?.actor, "Shift Supervisor");
+  });
+
+  it("carries a reopen across a new store instance, retaining both decisions", async () => {
+    const shift = await store.createShift("Night Shift");
+    await store.appendEvent(makeEvent(shift.id, { occurredAt: "2026-09-08T05:02:00Z", kind: "status_claimed", subject: "damaged case D104", claim: "send to claims" }));
+    await store.appendEvent(makeEvent(shift.id, { id: "claim-2", occurredAt: "2026-09-08T05:14:00Z", kind: "status_claimed", subject: "D104", claim: "discarded" }));
+    await store.appendEvent(
+      recordableDecision({ state: (await store.getShiftState(shift.id))!, subject: "D104", claim: "send to claims", actor: "Shift Supervisor", eventId: "decision-1", occurredAt: "2026-09-08T05:40:00Z" }),
+    );
+    await store.appendEvent(
+      reopenableDecision({
+        state: (await store.getShiftState(shift.id))!,
+        subject: "D104",
+        actor: "Shift Supervisor",
+        reason: "Claims ticket was created in error",
+        eventId: "reopen-1",
+        occurredAt: "2026-09-08T06:05:00Z",
+      }),
+    );
+
+    // A brand new store instance (cold start) must see the reopen and the whole trail.
+    const coldStart = new DynamoDbShiftStore(port, "shift-events");
+    const state = await coldStart.getShiftState(shift.id);
+    const item = state?.items[0];
+    assert.equal(item?.status, "conflicted");
+    assert.equal(item?.decision?.canonicalValue, "claims", "the superseded decision survives persistence");
+    assert.deepEqual(
+      (await coldStart.getEvents(shift.id)).map((e) => e.kind),
+      ["status_claimed", "status_claimed", "decision_recorded", "decision_reopened"],
+    );
+    const reopened = (await coldStart.getEvents(shift.id)).find((e) => e.kind === "decision_reopened");
+    assert.equal(reopened?.actor, "Shift Supervisor");
+    assert.equal(reopened?.note, "Claims ticket was created in error");
+
+    // And a fresh decision after the reopen persists too, replacing the outcome.
+    await store.appendEvent(
+      recordableDecision({ state: (await store.getShiftState(shift.id))!, subject: "D104", claim: "discarded", actor: "Shift Supervisor", eventId: "decision-2", occurredAt: "2026-09-08T06:12:00Z" }),
+    );
+    const finalState = await coldStart.getShiftState(shift.id);
+    assert.equal(finalState?.items[0]?.status, "decided");
+    assert.equal(finalState?.items[0]?.decision?.canonicalValue, "discard");
+    assert.equal((await coldStart.getEvents(shift.id)).length, 5);
   });
 });

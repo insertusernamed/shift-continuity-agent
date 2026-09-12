@@ -44,12 +44,13 @@ export function createShiftContinuityAgentCoreApp(env: NodeJS.ProcessEnv = proce
     invocationHandler: {
       requestSchema: createAgentCoreRequestSchema(),
       async process(request, context: RequestContext) {
-        const { userText, shiftId } = parseAgentCoreInvocationRequest(request);
+        const { userText, shiftId, actor } = parseAgentCoreInvocationRequest(request);
         const session = await sessions.get(context.sessionId || DEFAULT_SESSION);
         const envelope = await invokeAgentCoreShift({
           store: session.store,
           shiftId: shiftId ?? session.shiftId,
           userText,
+          actor,
           interpreter,
           mode: "bedrock",
           bedrock: {

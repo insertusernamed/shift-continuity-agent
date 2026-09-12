@@ -283,3 +283,66 @@ describe("decision by equivalent subject phrasing", () => {
     assert.equal(item.decision?.canonicalValue, "discard");
   });
 });
+
+describe("scenario 7: decision provenance", () => {
+  const conflicted = foldState(TEST_SHIFT, conflictedEvents());
+
+  it("records the human actor on the append-only event", () => {
+    const event = recordableDecision({
+      state: conflicted,
+      subject: "damaged case D104",
+      claim: "send to claims",
+      actor: "Shift Supervisor",
+      eventId: "decision-1",
+      occurredAt: "2026-09-08T05:40:00Z",
+    });
+    assert.equal(event.actor, "Shift Supervisor");
+    assert.equal(event.note, undefined);
+    assert.deepEqual(validateEvent(event), event);
+  });
+
+  it("records an optional note alongside the actor", () => {
+    const event = recordableDecision({
+      state: conflicted,
+      subject: "damaged case D104",
+      claim: "claims",
+      actor: "Shift Supervisor",
+      note: "scanner label was correct",
+      eventId: "decision-1",
+      occurredAt: "2026-09-08T05:40:00Z",
+    });
+    assert.equal(event.note, "scanner label was correct");
+  });
+
+  it("survives the fold onto the item so the audit trail is readable", () => {
+    const state = foldState(TEST_SHIFT, [
+      ...conflictedEvents(),
+      validateEvent(
+        recordableDecision({
+          state: conflicted,
+          subject: "damaged case D104",
+          claim: "send to claims",
+          actor: "Shift Supervisor",
+          note: "scanner label was correct",
+          eventId: "decision-1",
+          occurredAt: "2026-09-08T05:40:00Z",
+        }),
+      ),
+    ]);
+    const item = d104Item(state);
+    assert.equal(item.status, "decided", "provenance must not change the lifecycle result");
+    assert.equal(item.decision?.canonicalValue, "claims");
+    assert.equal(item.decision?.actor, "Shift Supervisor");
+    assert.equal(item.decision?.note, "scanner label was correct");
+  });
+
+  it("keeps a decision without provenance readable (backward compatibility)", () => {
+    const state = foldState(TEST_SHIFT, [
+      ...conflictedEvents(),
+      validateEvent({ id: "legacy-decision", shiftId: "shift-1", occurredAt: "2026-09-08T05:40:00Z", kind: "decision_recorded", subject: "damaged case D104", description: "human decision", claim: "send to claims", source: "human" }),
+    ]);
+    const item = d104Item(state);
+    assert.equal(item.status, "decided");
+    assert.equal(item.decision?.actor, undefined);
+  });
+});

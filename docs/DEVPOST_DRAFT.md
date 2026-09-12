@@ -31,10 +31,13 @@ So the architecture is strict about it:
 - **The model interprets and operates; it never owns state.** Current state is computed
   by folding an append-only event log. If the agent wants to know something, it calls a
   tool.
-- **The model cannot resolve conflicts.** `record_human_decision` requires explicit
-  authorization that must be present in `invocationState`, populated deterministically
-  from the human's actual words before the model runs. "Just pick whichever makes sense
-  for D104" authorizes nothing; the gate refuses even if the model tries.
+- **The model cannot resolve conflicts — or undo decisions.** `record_human_decision`
+  and `reopen_human_decision` both require explicit authorization present in
+  `invocationState`, populated deterministically from the human's actual words before the
+  model runs. "Just pick whichever makes sense for D104" authorizes nothing; "was D104
+  decided correctly?" is a question, not an instruction to reopen; the gates refuse even
+  if the model tries. Who authorized a human action, and why, come from the application
+  context — the reopen tool takes no actor argument, so the model cannot invent one.
 - **Nothing bypasses validation.** The interpreter proposes; strict local schema
   validation disposes. A provider failure is a controlled error with zero state change.
 - **The system works with the LLM off.** The default interpreter is deterministic, so
@@ -53,6 +56,10 @@ where language is messy, and uncompromising where operational truth is at stake.
 - **Model-independent human-decision gate** — authorization for `record_human_decision`
   is detected deterministically from the current request (subject + explicitly selected
   known claim) and re-checked inside the tool.
+- **Append-only decision provenance and reopen** — a decision records who made it
+  (`actor`) and an optional note; it is undone only by appending `decision_reopened`,
+  which returns the item to conflict while the superseded decision stays on the record.
+  Human decisions and reopen actions are append-only, attributed, and auditable.
 - **Natural-language reporting with a validated interpreter boundary** — deterministic
   baseline by default; optional LLM (`EventInterpreter`) whose output is schema-checked,
   with identity fields structurally forbidden.
@@ -64,7 +71,7 @@ where language is messy, and uncompromising where operational truth is at stake.
   product" is visible, not asserted.
 - **One agent, two hosts** — the identical Strands agent runs locally and on Amazon
   Bedrock AgentCore Runtime (CodeZip), with per-session state and no duplicated logic.
-- **254 automated tests, all network-free** — no credentials, no accounts, no live LLM
+- **309 automated tests, all network-free** — no credentials, no accounts, no live LLM
   required for the suite, including WCAG AA contrast math checked against the rendered
   design tokens.
 

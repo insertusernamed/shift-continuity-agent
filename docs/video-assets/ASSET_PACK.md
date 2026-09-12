@@ -34,9 +34,10 @@ two element-clipped stills, which are 2× their section size. Requires Google Ch
 | 1 | [`../stills/01-hero-and-agent.png`](../stills/01-hero-and-agent.png) | Title, one-sentence explanation, status legend, agent entry point | "Shift handoff: only what still matters." |
 | 2 | [`../stills/02-dashboard-conflict.png`](../stills/02-dashboard-conflict.png) | Current State with the D104 conflict, its two reported claims, and the human-decision buttons | "Two reports disagree. The engine refuses to pick." |
 | 3 | [`../stills/03-tool-trace.png`](../stills/03-tool-trace.png) | One real agent turn with its tool trace (`✓ get_handoff → …`) | "The agent asks the engine — and shows you the call." |
-| 4 | [`../stills/04-decision-recorded.png`](../stills/04-decision-recorded.png) | The same item after the human decision: DECIDED | "A human decided. The event log recorded it." |
+| 4 | [`../stills/04-decision-recorded.png`](../stills/04-decision-recorded.png) | The same item after the human decision: DECIDED, attributed to **Shift Supervisor**, with the labelled **Reopen decision** action and its optional reason field | "A human decided — and it is attributed. The event log recorded it." |
 | 5 | [`../stills/05-handoff.png`](../stills/05-handoff.png) | The handoff after the decision: one action item, no review items | "The handoff collapses to the one thing still open." |
 | 6 | [`../stills/06-photo-evidence.png`](../stills/06-photo-evidence.png) | Photo evidence attached to its event in the append-only history | "Photos are evidence — interpreted as a note, never as truth." |
+| 7 | [`../stills/07-decision-reopened.png`](../stills/07-decision-reopened.png) | The same item after the decision is **reopened**: back to CONFLICT, the reopened claim still visible, the reopen attributed with its reason, and the claim buttons available again | "Undo is an append, not a rewrite: the decision stays on the record." |
 
 Asset 6 uses a **placeholder** image drawn in code by `scripts/seedDemo.ts`. Swap in a
 real photo of a damaged carton or a blocked aisle before the final render.
@@ -46,7 +47,8 @@ real photo of a damaged carton or a blocked aisle before the final render.
 Moved to [AI_VIDEO_PROMPTS.md](../AI_VIDEO_PROMPTS.md): one row per still with the tool
 prompt, camera motion, duration, transition, overlay text, and intro/transition/outro
 placement, plus a suggested 26-second cut and the motion-prompt guardrails. Stills 5 and 6
-are element crops rather than 16:9, so that file also covers how to matte them.
+are element crops rather than 16:9, so that file also covers how to matte them. Still 7 is
+for the optional reopen beat (see `docs/RECORDING_GUIDE.md`); the main cut does not need it.
 
 ## What the pack deliberately excludes
 

@@ -2,7 +2,14 @@ import { Agent, InvokeModelStage, Model, TextBlock, type Message, type SystemPro
 import type { ShiftStore } from "../store/jsonFileStore.ts";
 import type { EventInterpreter } from "../ingest/interpreter.ts";
 import { createAgentModel, resolveAgentModelConfig, type AgentModelProvider } from "./modelProvider.ts";
-import { classifyAgentRequest, extractExplicitHumanDecision, isHumanDecisionAuthorization, routingDirective } from "./requestRouting.ts";
+import {
+  classifyAgentRequest,
+  extractExplicitHumanDecision,
+  extractExplicitReopenRequest,
+  isHumanDecisionAuthorization,
+  isReopenAuthorization,
+  routingDirective,
+} from "./requestRouting.ts";
 import {
   createShiftContinuityTools,
   type AgentItemView,
@@ -33,7 +40,9 @@ export const SHIFT_CONTINUITY_SYSTEM_PROMPT = [
   "- Resolution updates are reports too: call report_event for \"Aisle 7 is clear now\".",
   "Human authority:",
   "- Never resolve conflicting claims yourself and never make a human-authority decision.",
-  "- Only call record_human_decision when invocationState contains explicit human authorization (a human selected one of the available claims in the current request). Never fabricate that selection.",
+  "- Only call record_human_decision when invocationState contains explicit human authorization (a human selected one of the available claims in the current request). Never fabricate that selection, and never pass an actor or note of your own — those come from the application context.",
+  "- Only call reopen_human_decision when the current request explicitly asks to reopen, reconsider, undo, or correct the decision on a specific item, e.g. \"Reopen D104\". A question about a decision — \"was D104 decided correctly?\", \"what happened with D104?\" — is not an instruction to reopen, and a request with no subject (\"can you reconsider it?\") is not authorized at all.",
+  "- Never reopen a decision on your own initiative, never reopen something other than what the human named, and never treat a reopen as a way to change the chosen outcome yourself: after a reopen the item is conflicted and another explicit human choice is required.",
   "- If a human has not selected a claim, surface the conflicting options and say that human review is required.",
   "- Surface human review only when the deterministic system marks something conflicted.",
   "Honesty:",
@@ -43,6 +52,15 @@ export const SHIFT_CONTINUITY_SYSTEM_PROMPT = [
 ].join("\n");
 
 export type AgentMode = "deterministic" | "bedrock";
+
+/**
+ * Application-supplied context for one request. The actor is who the operation
+ * is being performed on behalf of; it comes from the client (the UI's "acting
+ * as" field), never from the model's interpretation of the message.
+ */
+export interface AgentInvocationContext {
+  actor?: string;
+}
 
 /** Narrow model-independent boundary used by deterministic tests and offline routing. */
 export interface AgentRunner {
@@ -83,7 +101,7 @@ export interface ShiftContinuityAgentResult {
 }
 
 export interface ShiftContinuityAgent {
-  invoke(userText: string): Promise<ShiftContinuityAgentResult>;
+  invoke(userText: string, context?: AgentInvocationContext): Promise<ShiftContinuityAgentResult>;
   getTrace(): ToolTrace[];
 }
 
@@ -114,17 +132,27 @@ export function createShiftContinuityAgent(
   );
 
   return {
-    async invoke(userText: string): Promise<ShiftContinuityAgentResult> {
+    async invoke(userText: string, context?: AgentInvocationContext): Promise<ShiftContinuityAgentResult> {
       const startTrace = trace.length;
       // Deterministic, model-independent pre-processing: whether this request
-      // legally authorizes a human decision, and what kind of request it is.
-      // The tool gate still rejects any unauthorized decision call, and the
-      // runner injects a routing directive from this state for obvious cases.
+      // legally authorizes a human action, and what kind of request it is.
+      // The tool gates still reject any unauthorized call, and the runner
+      // injects a routing directive from this state for obvious cases.
       const authorization = extractExplicitHumanDecision(userText);
+      const reopenRequest = extractExplicitReopenRequest(userText);
+      const actor = context?.actor?.trim();
       const invocationState: Record<string, unknown> = {
         routingIntent: classifyAgentRequest(userText),
       };
-      if (authorization) invocationState.humanDecisionAuthorization = authorization;
+      if (authorization) {
+        invocationState.humanDecisionAuthorization = { ...authorization, ...(actor ? { actor } : {}) };
+      }
+      // A reopen with no named human has nobody to attribute the undo to, so it
+      // is not authorized: the request is still routed as a reopen and the tool
+      // refuses, rather than the event being recorded anonymously.
+      if (reopenRequest && actor) {
+        invocationState.reopenAuthorization = { ...reopenRequest, actor };
+      }
 
       try {
         const runnerResult = await runner.invoke(userText, invocationState);
@@ -240,6 +268,15 @@ export class DeterministicAgentRunner implements AgentRunner {
   constructor(private readonly tools: ShiftContinuityTools) {}
 
   async invoke(userText: string, invocationState: Record<string, unknown>): Promise<{ response: string }> {
+    const reopen = invocationState.reopenAuthorization;
+    if (isReopenAuthorization(reopen)) {
+      await this.tools.reopenHumanDecision.invoke(
+        { subject: reopen.subject },
+        { invocationState } as never,
+      );
+      return { response: "" };
+    }
+
     const authorization = invocationState.humanDecisionAuthorization;
     if (isHumanDecisionAuthorization(authorization)) {
       await this.tools.recordHumanDecision.invoke(
@@ -250,6 +287,17 @@ export class DeterministicAgentRunner implements AgentRunner {
     }
 
     switch (classifyAgentRequest(userText)) {
+      case "reopen": {
+        // Routed as a reopen but never authorized (the application named no
+        // human), so the tool's own gate is exercised and returns an honest
+        // refusal. Falling through to report_event here would disguise a
+        // refused human action as an uninterpretable report.
+        const request = extractExplicitReopenRequest(userText);
+        if (request) {
+          await this.tools.reopenHumanDecision.invoke({ subject: request.subject }, { invocationState } as never);
+        }
+        break;
+      }
       case "handoff":
         await this.tools.getHandoff.invoke({});
         break;
@@ -283,6 +331,8 @@ function projectAuthoritativeResult(
       return projectHandoffResult(observations.handoff);
     case "humanDecision":
       return projectDecisionResult(observations.humanDecision);
+    case "reopenDecision":
+      return projectReopenResult(observations.reopenDecision);
     default:
       return { ok: true, response: runnerResponse };
   }
@@ -329,6 +379,18 @@ function projectDecisionResult(
     response: `Recorded human decision: ${observation.item.subject} is decided as ${observation.item.decision?.value ?? observation.event.claim}.`,
     item: observation.item,
     decision: observation.item.decision,
+  };
+}
+
+function projectReopenResult(
+  observation: ReturnType<ShiftContinuityTools["getObservations"]>["reopenDecision"],
+): Omit<ShiftContinuityAgentResult, "toolTrace"> {
+  if (!observation) return { ok: false, response: "Tool failed: reopen_human_decision returned no result", error: "missing reopen result" };
+  if (!observation.ok) return projectFailure(observation);
+  return {
+    ok: true,
+    response: `Reopened: ${observation.item.subject} is conflicted again and needs a human decision.`,
+    item: observation.item,
   };
 }
 

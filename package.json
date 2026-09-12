@@ -19,7 +19,8 @@
     "@aws-sdk/lib-dynamodb": "^3.1130.0",
     "@types/node": "^24.0.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "zod": "4.5.4"
   },
   "allowScripts": {
     "esbuild@0.28.2": true

@@ -66,8 +66,9 @@ try {
   const d104 = state3.body.items.find((i: any) => i.canonicalSubject === "d104");
   check("D104 still conflicted", d104?.status === "conflicted");
 
-  // Scenario 5: explicit human decision through the agent.
-  const explicit = await api("POST", `/api/shifts/${shiftId}/agent`, { message: "Send D104 to claims." });
+  // Scenario 5: explicit human decision through the agent, attributed to the
+  // acting human the client supplied.
+  const explicit = await api("POST", `/api/shifts/${shiftId}/agent`, { message: "Send D104 to claims.", actor: "Shift Supervisor" });
   check("explicit decision recorded", explicit.status === 200 && explicit.body.decision?.canonicalValue === "claims", JSON.stringify(explicit.body.response));
   check("tool trace shows record_human_decision", explicit.body.toolTrace?.[0]?.tool === "record_human_decision");
   const state4 = await api("GET", `/api/shifts/${shiftId}/state`);
@@ -84,6 +85,46 @@ try {
     && agentHandoff.body.handoff.requiresHumanReview.length === 0
     && directHandoff.body.requiresHumanReview.length === 0,
     `actions=${JSON.stringify(directActions)}`);
+
+  // Scenario 9: decision provenance and explicit reopen. The agent may only
+  // undo a decision the human named, and may never invent who authorized it.
+  const reopenWithoutActor = await api("POST", `/api/shifts/${shiftId}/agent`, { message: "Reopen D104" });
+  check("reopen refused without a named human", reopenWithoutActor.status === 502
+    && reopenWithoutActor.body.toolTrace?.[0]?.tool === "reopen_human_decision"
+    && reopenWithoutActor.body.toolTrace?.[0]?.status === "error"
+    && /human authorization/i.test(reopenWithoutActor.body.error ?? ""),
+    JSON.stringify(reopenWithoutActor.body.error ?? reopenWithoutActor.body.response));
+
+  const reopened = await api("POST", `/api/shifts/${shiftId}/agent`, {
+    message: "Reopen D104 because the disposal record was wrong",
+    actor: "Shift Supervisor",
+  });
+  check("explicit reopen returns the item to conflict", reopened.status === 200
+    && reopened.body.item?.status === "conflicted"
+    && reopened.body.toolTrace?.[0]?.tool === "reopen_human_decision",
+    JSON.stringify(reopened.body.response));
+  check("the superseded decision stays attributed on the item",
+    reopened.body.item?.decision?.canonicalValue === "claims" && reopened.body.item?.decision?.actor === "Shift Supervisor");
+  const reopenedHandoff = await api("GET", `/api/shifts/${shiftId}/handoff`);
+  check("reopened item reappears under human review",
+    reopenedHandoff.body.requiresHumanReview.length === 1 && reopenedHandoff.body.decidedDuringShiftCount === 0);
+
+  const redecided = await api("POST", `/api/shifts/${shiftId}/agent`, { message: "Send D104 to discard.", actor: "Shift Supervisor" });
+  check("a new explicit decision settles it again", redecided.status === 200
+    && redecided.body.item?.status === "decided"
+    && redecided.body.item?.decision?.canonicalValue === "discard",
+    JSON.stringify(redecided.body.response));
+  const finalHandoff = await api("GET", `/api/shifts/${shiftId}/handoff`);
+  check("decided item leaves human review again",
+    finalHandoff.body.requiresHumanReview.length === 0 && finalHandoff.body.decidedDuringShiftCount === 1);
+
+  const trail = await api("GET", `/api/shifts/${shiftId}/events`);
+  const humanEvents = trail.body.filter((e: any) => e.kind === "decision_recorded" || e.kind === "decision_reopened");
+  check("every human action is attributed in the append-only history",
+    humanEvents.length === 3 && humanEvents.every((e: any) => e.actor === "Shift Supervisor"),
+    `${humanEvents.length} human events`);
+  check("the reopen reason is recorded verbatim",
+    humanEvents.some((e: any) => e.kind === "decision_reopened" && e.note === "the disposal record was wrong"));
 
   // Scenario 6: the agent must route the odd report to report_event and let
   // the validated interpreter reject it — proving the controlled rejection

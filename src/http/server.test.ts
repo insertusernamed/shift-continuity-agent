@@ -248,6 +248,173 @@ describe("HTTP API", () => {
     });
   });
 
+  describe("decision provenance and reopen endpoint", () => {
+    async function makeDecidedApp(actor = "Shift Supervisor") {
+      const app = await makeApp();
+      const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "Night Shift" });
+      await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events`, {
+        occurredAt: "2026-09-08T05:02:00Z", kind: "status_claimed", subject: "damaged case D104", description: "send to claims", claim: "send to claims", source: "scanner",
+      });
+      await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events`, {
+        occurredAt: "2026-09-08T05:14:00Z", kind: "status_claimed", subject: "damaged case D104", description: "discarded", claim: "discarded", source: "operator",
+      });
+      await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/items/d104/decision`, { claim: "send to claims", actor });
+      return { app, shiftId: shift.id as string };
+    }
+
+    it("records the acting human and an optional note on the decision event", async () => {
+      const app = await makeApp();
+      try {
+        const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "Night Shift" });
+        await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events`, {
+          occurredAt: "2026-09-08T05:02:00Z", kind: "status_claimed", subject: "damaged case D104", description: "send to claims", claim: "send to claims", source: "scanner",
+        });
+        await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events`, {
+          occurredAt: "2026-09-08T05:14:00Z", kind: "status_claimed", subject: "D104", description: "discarded", claim: "discarded", source: "operator",
+        });
+
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/items/d104/decision`, {
+          claim: "send to claims",
+          actor: "Shift Supervisor",
+          note: "scanner label was correct",
+        });
+
+        assert.equal(res.status, 200);
+        assert.equal(res.body.event.actor, "Shift Supervisor");
+        assert.equal(res.body.event.note, "scanner label was correct");
+        assert.equal(res.body.item.decision.actor, "Shift Supervisor");
+
+        // Provenance is part of the append-only history, not a side channel.
+        const events = await api(app.baseUrl, "GET", `/api/shifts/${shift.id}/events`);
+        const decision = events.body.find((e: any) => e.kind === "decision_recorded");
+        assert.equal(decision.actor, "Shift Supervisor");
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("reopens a decided item: it returns to human review and history keeps the decision", async () => {
+      const { app, shiftId } = await makeDecidedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/d104/reopen`, {
+          actor: "Shift Supervisor",
+          reason: "Claims ticket was created in error",
+        });
+
+        assert.equal(res.status, 200);
+        assert.equal(res.body.event.kind, "decision_reopened");
+        assert.equal(res.body.event.actor, "Shift Supervisor");
+        assert.equal(res.body.item.status, "conflicted");
+        assert.equal(res.body.item.decision.canonicalValue, "claims", "the superseded decision stays visible");
+
+        const handoff = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/handoff`);
+        assert.equal(handoff.body.requiresHumanReview.length, 1);
+        assert.equal(handoff.body.decidedDuringShiftCount, 0);
+
+        // A new explicit human decision settles it again, and the original
+        // decision event is still on the record.
+        const redecorate = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/d104/decision`, { claim: "discard", actor: "Shift Supervisor" });
+        assert.equal(redecorate.status, 200);
+        assert.equal(redecorate.body.item.status, "decided");
+        assert.equal(redecorate.body.item.decision.canonicalValue, "discard");
+
+        const events = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/events`);
+        assert.deepEqual(
+          events.body.map((e: any) => e.kind),
+          ["status_claimed", "status_claimed", "decision_recorded", "decision_reopened", "decision_recorded"],
+        );
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("409 when reopening an item that is not decided", async () => {
+      const app = await makeApp();
+      try {
+        const { body: shift } = await api(app.baseUrl, "POST", "/api/shifts", { name: "Night Shift" });
+        await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/events`, {
+          occurredAt: "2026-09-08T04:46:00Z", kind: "problem_reported", subject: "freezer inspection", description: "missed", source: "radio",
+        });
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shift.id}/items/${encodeURIComponent("freezer inspection")}/reopen`, { actor: "Shift Supervisor" });
+        assert.equal(res.status, 409);
+        assert.equal(res.body.code, "item_not_decided");
+        assert.match(res.body.error, /not decided/i);
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("400 when reopening without naming who authorized it", async () => {
+      const { app, shiftId } = await makeDecidedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/items/d104/reopen`, {});
+        assert.equal(res.status, 400);
+        assert.equal(res.body.code, "missing_actor");
+
+        const state = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/state`);
+        assert.equal(state.body.items[0].status, "decided", "a refused reopen must not mutate state");
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("regression: decision_reopened cannot be smuggled through the generic event endpoint", async () => {
+      const { app, shiftId } = await makeDecidedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/events`, {
+          occurredAt: "2026-09-08T06:05:00Z", kind: "decision_reopened", subject: "damaged case D104", description: "bypass attempt", source: "operator",
+        });
+        assert.equal(res.status, 400);
+        assert.match(res.body.error, /reopen/i);
+
+        const state = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/state`);
+        assert.equal(state.body.items[0].status, "decided", "state must be unchanged");
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("attributes an agent-routed decision and reopen to the actor the client supplied", async () => {
+      const { app, shiftId } = await makeDecidedApp("Dana");
+      try {
+        const reopen = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/agent`, {
+          message: "Reopen D104 because the disposal record was wrong",
+          actor: "Dana",
+        });
+        assert.equal(reopen.status, 200);
+        assert.equal(reopen.body.ok, true);
+        assert.deepEqual(reopen.body.toolTrace.map((t: any) => t.tool), ["reopen_human_decision"]);
+        assert.equal(reopen.body.item.status, "conflicted");
+
+        const decide = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/agent`, {
+          message: "Send D104 to claims.",
+          actor: "Dana",
+        });
+        assert.equal(decide.status, 200);
+        assert.equal(decide.body.decision.actor, "Dana");
+        assert.equal(decide.body.item.status, "decided");
+      } finally {
+        app.cleanup();
+      }
+    });
+
+    it("refuses an agent reopen when the client supplies no actor", async () => {
+      const { app, shiftId } = await makeDecidedApp();
+      try {
+        const res = await api(app.baseUrl, "POST", `/api/shifts/${shiftId}/agent`, { message: "Reopen D104" });
+        assert.equal(res.status, 502);
+        assert.deepEqual(res.body.toolTrace.map((t: any) => t.tool), ["reopen_human_decision"]);
+        assert.equal(res.body.toolTrace[0].status, "error");
+        assert.match(res.body.error, /human authorization/i);
+
+        const state = await api(app.baseUrl, "GET", `/api/shifts/${shiftId}/state`);
+        assert.equal(state.body.items[0].status, "decided");
+      } finally {
+        app.cleanup();
+      }
+    });
+  });
+
   describe("shift agent endpoint", () => {
     async function makeAgentApp() {
       const app = await makeApp();

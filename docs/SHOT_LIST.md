@@ -4,10 +4,11 @@ The shot-by-shot plan for the ~3:45 demo video. Every shot runs against the real
 the frozen demo state; nothing is a mock-up.
 
 - Commands, viewport, exact agent text, expected results, and framing: [`RECORDING_GUIDE.md`](RECORDING_GUIDE.md).
-- Motion prompts for the six stills: [`AI_VIDEO_PROMPTS.md`](AI_VIDEO_PROMPTS.md).
+- Motion prompts for the seven stills: [`AI_VIDEO_PROMPTS.md`](AI_VIDEO_PROMPTS.md).
 - Stills: [`stills/`](stills/) (2880×1620 PNGs at the locked 1440×810 viewport).
 
-**Total planned runtime: 3:45** (within the 3:00–4:00 target).
+**Total planned runtime: 3:45** (within the 3:00–4:00 target). The optional **Shot 10**
+(next, at the end) adds 0:25 — include it only if you also trim, or the cut passes 4:00.
 
 ---
 
@@ -103,12 +104,24 @@ the frozen demo state; nothing is a mock-up.
 
 - **Duration:** 0:23
 - **What is visible:** Either the README's AgentCore deployment section or `agentcore status` output showing the runtime READY, then a closing title card.
-- **Narration:** *"Same agent, same tools, same domain — the local app and Amazon Bedrock AgentCore Runtime are two hosts for one  implementation. 254 automated tests, all offline. The deployed runtime keeps its event log in DynamoDB, so state survives a cold start."*
+- **Narration:** *"Same agent, same tools, same domain — the local app and Amazon Bedrock AgentCore Runtime are two hosts for one  implementation. 309 automated tests, all offline. The deployed runtime keeps its event log in DynamoDB, so state survives a cold start."*
 - **Screen action:** Cut to a clean capture of the deployment section. Then fade to the closing card.
 - **Zoom/crop:** Full frame; text should be large and unmoving so it stays sharp.
 - **Still:** none. Closing card in the app's type: *"Shift Handoff — the model runs the tools. The domain owns the truth."*
 
 ---
+
+## Shot 10 (optional) — The decision can be reopened, not rewritten
+
+Only shoot this if the cut still lands under 4:00 after the main nine. It is the
+strongest evidence that the audit trail is real rather than a pile of mutable rows.
+
+- **Duration:** 0:25
+- **What is visible:** The DECIDED D104 card with its attribution (**Decision claims — Recorded by Shift Supervisor**) and the **Reason (optional)** field. After clicking **Reopen decision**: the card flips to **CONFLICT**, still showing the reopened claim, plus `Reopened by Shift Supervisor — "Claims ticket was created in error"` and both claim buttons again.
+- **Narration:** *"A decision is not a rewrite. Reopening appends an event: the original decision stays on the record, the item goes back to conflict, and a human has to choose again — this time with a reason attached."*
+- **Screen action:** Type the reason, click **Reopen decision**, hold on the card while it changes, then click **send to claims** to settle it again so the handoff matches `05-handoff.png`.
+- **Zoom/crop:** Punch in ~1.3× on the D104 card so the attribution line and the reason are both legible.
+- **Still:** `07-decision-reopened.png`
 
 ## Editing notes
 

@@ -2,7 +2,7 @@ import { tool, type InvokableTool, type ToolContext } from "@strands-agents/sdk"
 import { z } from "zod";
 import type { OperationalEvent, OperationalItem, ShiftHandoff } from "../domain/types.ts";
 import { buildHandoff } from "../domain/handoff.ts";
-import { recordableDecision, DecisionValidationError } from "../domain/decide.ts";
+import { recordableDecision, reopenableDecision, DecisionValidationError } from "../domain/decide.ts";
 import { canonicalClaim } from "../domain/claims.ts";
 import { canonicalSubject } from "../domain/subjects.ts";
 import type { ShiftStore } from "../store/jsonFileStore.ts";
@@ -14,13 +14,30 @@ export interface HumanDecisionAuthorization {
   canonicalSubject: string;
   claim: string;
   canonicalClaim: string;
+  /** Who authorized it, from the application's human context (never the model). */
+  actor?: string;
+  /** Optional human-supplied note recorded with the decision. */
+  note?: string;
+}
+
+/**
+ * Explicit human authorization to undo the decision on one subject. `actor` is
+ * required: an unattributed reopen is refused, and the model cannot supply or
+ * override it because the reopen tool does not accept an actor input at all.
+ */
+export interface ReopenAuthorization {
+  subject: string;
+  canonicalSubject: string;
+  actor: string;
+  reason?: string;
 }
 
 export type ToolName =
   | "report_event"
   | "get_shift_state"
   | "get_handoff"
-  | "record_human_decision";
+  | "record_human_decision"
+  | "reopen_human_decision";
 
 export interface ToolTrace {
   tool: ToolName;
@@ -40,7 +57,10 @@ export interface AgentItemView {
   description: string;
   status: OperationalItem["status"];
   claims: Array<{ value: string; canonicalValue: string }>;
-  decision?: { value: string; canonicalValue: string };
+  /** Present once decided. On a conflicted item this is the superseded decision. */
+  decision?: { value: string; canonicalValue: string; actor?: string; note?: string };
+  /** Present only while a reopened item is awaiting a new human decision. */
+  reopened?: { occurredAt: string; actor?: string; note?: string };
   blockedByCanonicalSubject?: string;
 }
 
@@ -91,6 +111,21 @@ export interface HumanDecisionInput {
   claim: string;
 }
 
+/**
+ * The reopen tool deliberately takes only the subject: the actor and the reason
+ * are human inputs carried in the invocation context, so the model physically
+ * cannot fabricate who authorized an undo or why.
+ */
+export interface ReopenHumanDecisionInput {
+  subject: string;
+}
+
+export interface ReopenHumanDecisionToolResult {
+  ok: true;
+  event: OperationalEvent;
+  item: AgentItemView;
+}
+
 export type ReportEventTool = InvokableTool<ReportEventInput, ReportEventToolResult | ToolFailure>;
 
 export type ShiftStateTool = InvokableTool<Record<string, never>, ShiftStateToolResult | ToolFailure>;
@@ -99,7 +134,9 @@ export type HandoffTool = InvokableTool<Record<string, never>, HandoffToolResult
 
 export type HumanDecisionTool = InvokableTool<HumanDecisionInput, HumanDecisionToolResult | ToolFailure>;
 
-export type ToolObservationName = "reportEvent" | "shiftState" | "handoff" | "humanDecision";
+export type ReopenHumanDecisionTool = InvokableTool<ReopenHumanDecisionInput, ReopenHumanDecisionToolResult | ToolFailure>;
+
+export type ToolObservationName = "reportEvent" | "shiftState" | "handoff" | "humanDecision" | "reopenDecision";
 
 export interface ToolObservations {
   lastTool?: ToolObservationName;
@@ -107,6 +144,7 @@ export interface ToolObservations {
   shiftState?: ShiftStateToolResult | ToolFailure;
   handoff?: HandoffToolResult | ToolFailure;
   humanDecision?: HumanDecisionToolResult | ToolFailure;
+  reopenDecision?: ReopenHumanDecisionToolResult | ToolFailure;
 }
 
 export interface ShiftContinuityToolDependencies {
@@ -122,6 +160,7 @@ export interface ShiftContinuityTools {
   getShiftState: ShiftStateTool;
   getHandoff: HandoffTool;
   recordHumanDecision: HumanDecisionTool;
+  reopenHumanDecision: ReopenHumanDecisionTool;
   tools: readonly InvokableTool<unknown, unknown>[];
   getTrace(): ToolTrace[];
   getObservations(): ToolObservations;
@@ -288,6 +327,10 @@ export function createShiftContinuityTools(dependencies: ShiftContinuityToolDepe
           claim: input.claim,
           eventId: crypto.randomUUID(),
           occurredAt: dependencies.now?.() ?? new Date().toISOString(),
+          // Provenance is read from the authorization the application built for
+          // this request, never from the model's tool arguments.
+          ...(authorization.actor ? { actor: authorization.actor } : {}),
+          ...(authorization.note ? { note: authorization.note } : {}),
         });
         dependencies.store.appendEvent(event);
         const updated = currentState();
@@ -312,12 +355,68 @@ export function createShiftContinuityTools(dependencies: ShiftContinuityToolDepe
     },
   });
 
+  const reopenHumanDecision = tool({
+    name: "reopen_human_decision",
+    description:
+      "Undo the decision on a currently decided item, after a human explicitly asked to reopen, reconsider, undo, or correct it. Only call this when the current request names the specific item to reopen; never reopen on your own initiative. The actor and reason come from the human context, not from you — this tool takes no actor or reason argument. The tool rejects calls without explicit human authorization.",
+    inputSchema: z.object({
+      subject: z.string().min(1).describe("The decided subject whose decision should be reopened."),
+    }),
+    callback: (input, context?: ToolContext) => {
+      try {
+        const authorization = context?.invocationState.reopenAuthorization;
+        if (!isAuthorizedReopen(authorization, input.subject)) {
+          const failure: ToolFailure = {
+            ok: false,
+            error: {
+              message: "explicit human authorization required; reopening a decision is a human action",
+              code: "human_authorization_required",
+            },
+          };
+          observations.reopenDecision = failure;
+          observations.lastTool = "reopenDecision";
+          trace({ tool: "reopen_human_decision", status: "error", summary: failure.error.message });
+          return failure;
+        }
+
+        const event = reopenableDecision({
+          state: currentState(),
+          subject: input.subject,
+          actor: authorization.actor,
+          ...(authorization.reason ? { reason: authorization.reason } : {}),
+          eventId: crypto.randomUUID(),
+          occurredAt: dependencies.now?.() ?? new Date().toISOString(),
+        });
+        dependencies.store.appendEvent(event);
+        const updated = currentState();
+        const item = updated.items.find((candidate) => candidate.canonicalSubject === canonicalSubject(input.subject));
+        if (!item) throw new Error("reopened decision did not produce a deterministic operational item");
+        const result: ReopenHumanDecisionToolResult = { ok: true, event, item: toItemView(item) };
+        observations.reopenDecision = result;
+        observations.lastTool = "reopenDecision";
+        trace({
+          tool: "reopen_human_decision",
+          status: "success",
+          summary: `reopened — ${item.subject} CONFLICT (human review required)`,
+        });
+        return result;
+      } catch (error) {
+        const failure = failureResult(error);
+        observations.reopenDecision = failure;
+        observations.lastTool = "reopenDecision";
+        trace({ tool: "reopen_human_decision", status: "error", summary: failure.error.message });
+        return failure;
+      }
+    },
+  });
+
   return {
     reportEvent,
     getShiftState,
     getHandoff,
     recordHumanDecision,
-    tools: [reportEvent, getShiftState, getHandoff, recordHumanDecision],
+    reopenHumanDecision,
+    tools: [reportEvent, getShiftState, getHandoff, recordHumanDecision, reopenHumanDecision],
     getTrace: () => [...traces],
     getObservations: () => ({
       ...observations,
@@ -325,6 +424,7 @@ export function createShiftContinuityTools(dependencies: ShiftContinuityToolDepe
       ...(observations.shiftState ? { shiftState: observations.shiftState } : {}),
       ...(observations.handoff ? { handoff: observations.handoff } : {}),
       ...(observations.humanDecision ? { humanDecision: observations.humanDecision } : {}),
+      ...(observations.reopenDecision ? { reopenDecision: observations.reopenDecision } : {}),
     }),
     clearTrace: () => {
       traces.length = 0;
@@ -333,6 +433,7 @@ export function createShiftContinuityTools(dependencies: ShiftContinuityToolDepe
       delete observations.shiftState;
       delete observations.handoff;
       delete observations.humanDecision;
+      delete observations.reopenDecision;
     },
   };
 }
@@ -348,6 +449,22 @@ function isAuthorizedDecision(
     && candidate.canonicalClaim === canonicalClaim(claim);
 }
 
+/**
+ * A reopen must be authorized for the exact subject the model asked about, and
+ * must name a human: an authorization with no actor cannot attribute the undo
+ * to anyone, so it is treated as absent rather than silently recorded.
+ */
+function isAuthorizedReopen(
+  authorization: unknown,
+  subject: string,
+): authorization is ReopenAuthorization {
+  if (!authorization || typeof authorization !== "object") return false;
+  const candidate = authorization as Partial<ReopenAuthorization>;
+  return typeof candidate.actor === "string"
+    && candidate.actor.trim().length > 0
+    && candidate.canonicalSubject === canonicalSubject(subject);
+}
+
 function toItemView(item: OperationalItem): AgentItemView {
   return {
     id: item.id,
@@ -356,7 +473,25 @@ function toItemView(item: OperationalItem): AgentItemView {
     description: item.description,
     status: item.status,
     claims: item.claims.map((claim) => ({ value: claim.value, canonicalValue: claim.canonicalValue })),
-    ...(item.decision ? { decision: { value: item.decision.value, canonicalValue: item.decision.canonicalValue } } : {}),
+    ...(item.decision
+      ? {
+          decision: {
+            value: item.decision.value,
+            canonicalValue: item.decision.canonicalValue,
+            ...(item.decision.actor ? { actor: item.decision.actor } : {}),
+            ...(item.decision.note ? { note: item.decision.note } : {}),
+          },
+        }
+      : {}),
+    ...(item.reopened
+      ? {
+          reopened: {
+            occurredAt: item.reopened.occurredAt,
+            ...(item.reopened.actor ? { actor: item.reopened.actor } : {}),
+            ...(item.reopened.note ? { note: item.reopened.note } : {}),
+          },
+        }
+      : {}),
     ...(item.blockedByCanonicalSubject ? { blockedByCanonicalSubject: item.blockedByCanonicalSubject } : {}),
   };
 }

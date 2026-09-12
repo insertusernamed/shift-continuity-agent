@@ -1,7 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { canonicalClaim } from "../domain/claims.ts";
-import { classifyAgentRequest, extractExplicitHumanDecision, routingDirective } from "./requestRouting.ts";
+import {
+  classifyAgentRequest,
+  extractExplicitHumanDecision,
+  extractExplicitReopenRequest,
+  routingDirective,
+} from "./requestRouting.ts";
 
 describe("extractExplicitHumanDecision", () => {
   it("authorizes explicit selection phrasings with the correct subject and claim", () => {
@@ -61,6 +66,58 @@ describe("classifyAgentRequest", () => {
     assert.equal(classifyAgentRequest("Send D104 to claims"), "decision");
     assert.equal(classifyAgentRequest("For D104, use claims"), "decision");
   });
+
+  it("classifies an explicit reopen request as reopen", () => {
+    assert.equal(classifyAgentRequest("Reopen D104"), "reopen");
+    assert.equal(classifyAgentRequest("Reconsider D104 please"), "reopen");
+  });
+});
+
+describe("extractExplicitReopenRequest", () => {
+  it("authorizes explicit reopen phrasings naming a specific subject", () => {
+    const cases: Array<[string, string]> = [
+      ["Reopen D104", "D104"],
+      ["Reopen D104.", "D104"],
+      ["Re-open D104", "D104"],
+      ["Reconsider D104", "D104"],
+      ["Reconsider the damaged case D104", "D104"],
+      ["Undo the decision on D104", "D104"],
+      ["Reopen the decision for D104", "D104"],
+      ["I want to reopen D104", "D104"],
+      ["Please reopen D104 because the disposal record was wrong", "D104"],
+    ];
+    for (const [text, subject] of cases) {
+      const request = extractExplicitReopenRequest(text);
+      assert.ok(request, `expected reopen authorization for: ${text}`);
+      assert.equal(request.subject, subject, text);
+      assert.equal(request.canonicalSubject, subject.toLowerCase(), text);
+    }
+  });
+
+  it("captures a reason only when the human supplied one", () => {
+    assert.equal(
+      extractExplicitReopenRequest("Reopen D104 because the disposal record was wrong")?.reason,
+      "the disposal record was wrong",
+    );
+    assert.equal(extractExplicitReopenRequest("Reopen D104")?.reason, undefined);
+  });
+
+  it("never authorizes a vague, delegated, or subject-less reopen request", () => {
+    const vague = [
+      "What happened with D104?",
+      "Was D104 decided correctly?",
+      "Can you reconsider it?",
+      "Maybe we should change D104",
+      "Is D104 still decided?",
+      "D104 was decided, right?",
+      "Aisle 7 is blocked.",
+      "Send D104 to claims.",
+      "What should we do with D104?",
+    ];
+    for (const text of vague) {
+      assert.equal(extractExplicitReopenRequest(text), undefined, `must NOT authorize a reopen: ${text}`);
+    }
+  });
 });
 
 describe("routingDirective", () => {
@@ -96,5 +153,27 @@ describe("routingDirective", () => {
   it("emits nothing when routing is absent or handoff", () => {
     assert.equal(routingDirective({}), undefined);
     assert.equal(routingDirective({ routingIntent: "handoff" }), undefined);
+  });
+
+  it("emits a reopen_human_decision directive only when explicit reopen authorization exists", () => {
+    assert.equal(routingDirective({ routingIntent: "reopen" }), undefined, "intent alone is not authorization");
+    const directive = routingDirective({
+      routingIntent: "reopen",
+      reopenAuthorization: { subject: "D104", canonicalSubject: "d104", actor: "Shift Supervisor" },
+    });
+    assert.ok(directive);
+    assert.match(directive!, /reopen_human_decision/);
+    assert.match(directive!, /D104/);
+  });
+
+  it("prefers reopen authorization over decision authorization when both are present", () => {
+    const directive = routingDirective({
+      routingIntent: "reopen",
+      reopenAuthorization: { subject: "D104", canonicalSubject: "d104", actor: "Shift Supervisor" },
+      humanDecisionAuthorization: { subject: "D104", canonicalSubject: "d104", claim: "claims", canonicalClaim: "claims" },
+    });
+    assert.ok(directive);
+    assert.match(directive!, /reopen_human_decision/);
+    assert.doesNotMatch(directive!, /record_human_decision/);
   });
 });

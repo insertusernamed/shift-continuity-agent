@@ -57,7 +57,53 @@ export function extractExplicitHumanDecision(text: string): HumanDecisionAuthori
   return undefined;
 }
 
-export type AgentRequestIntent = "report" | "state" | "handoff" | "decision";
+/**
+ * A reopen the current request explicitly asks for. It deliberately carries no
+ * actor: who is acting is application context, not something parsed out of the
+ * user's words, and the agent attaches it before invoking the tool.
+ */
+export interface ReopenRequest {
+  subject: string;
+  canonicalSubject: string;
+  reason?: string;
+}
+
+/**
+ * Explicit reopen phrasings. Conservative by construction: an undo verb is
+ * required, it must name a specific subject, and questions or hedges
+ * ("was D104 decided correctly?", "maybe we should change D104") never qualify.
+ * "Reconsider it" is refused because it names no subject.
+ */
+const REOPEN_SUBJECT = new RegExp(
+  `\\b(?:reopen|re-open|reconsider|undo)\\b(?:\\s+(?:the\\s+)?(?:decision|choice)\\s+(?:on|for))?\\s+${SUBJECT}\\b`,
+  "i",
+);
+
+/** Deterministic reopen authorization for the current request, if any. */
+export function extractExplicitReopenRequest(text: string): ReopenRequest | undefined {
+  const match = text.match(REOPEN_SUBJECT);
+  const subject = match?.groups?.subject;
+  if (!subject) return undefined;
+  const reason = extractReason(text);
+  return {
+    subject,
+    canonicalSubject: canonicalSubject(subject),
+    ...(reason ? { reason } : {}),
+  };
+}
+
+/**
+ * The optional "why" a human typed. Only an explicit causal marker counts, so
+ * the reason recorded in the audit trail is the human's words rather than a
+ * paraphrase an agent invented.
+ */
+function extractReason(text: string): string | undefined {
+  const match = text.match(/\b(?:because|reason:)\s+(.+)$/i);
+  const reason = match?.[1]?.trim().replace(/[.;]+$/, "").trim();
+  return reason ? reason.slice(0, 200) : undefined;
+}
+
+export type AgentRequestIntent = "report" | "state" | "handoff" | "decision" | "reopen";
 
 /**
  * Deterministic intent for one user request. Operational reports — including
@@ -66,6 +112,10 @@ export type AgentRequestIntent = "report" | "state" | "handoff" | "decision";
  * silently answering an unrelated state question.
  */
 export function classifyAgentRequest(text: string): AgentRequestIntent {
+  // Reopen is checked first and deliberately wins over decision: if a request
+  // both asks to reopen and looks like it names a claim, treating it as a
+  // reopen cannot silently settle a conflict, which is the safer failure.
+  if (extractExplicitReopenRequest(text)) return "reopen";
   if (extractExplicitHumanDecision(text)) return "decision";
   if (looksLikeHandoffQuestion(text)) return "handoff";
   if (looksLikeStateQuestion(text)) return "state";
@@ -79,6 +129,14 @@ export function classifyAgentRequest(text: string): AgentRequestIntent {
  * left to guess. Returns undefined when no directive applies.
  */
 export function routingDirective(invocationState: Record<string, unknown>): string | undefined {
+  const reopen = invocationState.reopenAuthorization;
+  if (isReopenAuthorization(reopen)) {
+    return [
+      "Deterministic human authorization (authoritative for this request): the human explicitly asked to",
+      `reopen the decision on ${reopen.subject}. Call reopen_human_decision with subject="${reopen.subject}"`,
+      "exactly. The actor and reason are supplied by the application; do not invent or alter them.",
+    ].join(" ");
+  }
   const authorization = invocationState.humanDecisionAuthorization;
   if (isHumanDecisionAuthorization(authorization)) {
     return [
@@ -114,6 +172,15 @@ function looksLikeHandoffQuestion(text: string): boolean {
 
 function looksLikeStateQuestion(text: string): boolean {
   return /\b(?:current state|what should we do|what do we do|conflict|conflicted|pick|choose|decide|review|open items?)\b/i.test(text);
+}
+
+export function isReopenAuthorization(value: unknown): value is ReopenRequest & { actor: string } {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ReopenRequest & { actor: string }>;
+  return typeof candidate.subject === "string"
+    && typeof candidate.canonicalSubject === "string"
+    && typeof candidate.actor === "string"
+    && candidate.actor.trim().length > 0;
 }
 
 export function isHumanDecisionAuthorization(value: unknown): value is HumanDecisionAuthorization {

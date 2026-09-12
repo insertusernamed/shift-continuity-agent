@@ -122,6 +122,24 @@ history and in `06-photo-evidence.png`.
 Steps 6 and 7 are the safety story and must not be skipped: the agent must refuse with no
 decision tool, and the explicit sentence must authorize the decision.
 
+### Optional ninth beat — reopen the decision (secondary, ~25s)
+
+The main 3:45 script above stays as it is. If you have room, this beat proves the audit
+trail is reversible without being destroyed, and it has its own still:
+
+| # | Action / exact text | Expected visible result | Keep in frame | Still |
+| --- | --- | --- | --- | --- |
+| 9 | On the DECIDED D104 card, type `Claims ticket was created in error` in **Reason (optional)** and press **Reopen decision** | D104 returns to **CONFLICT**; the card shows the reopened (superseded) decision and `Reopened by Shift Supervisor — "Claims ticket was created in error"`; the two claim buttons come back; the confirmation reads *Decision reopened…* | **Current state**, D104 card | `07-decision-reopened.png` |
+
+Then re-record the decision with **Send D104 to claims.** so the handoff returns to its
+frozen shape (3 resolved, 1 decided). If you take this beat, say the line plainly: *the
+original decision is not deleted — a reopen appends an event, and the item needs a new
+human choice.*
+
+Everything on the card is attributed to whoever is named in **Acting as** (default
+`Shift Supervisor`). That field is on camera on purpose: it is where the human identity a
+decision is recorded under comes from.
+
 ## 8. Framing
 
 - At 1440 wide the page is two columns: left = **Talk to the shift agent** + **Report**,
@@ -147,10 +165,10 @@ With the app running from step 4:
 BASE_URL=http://127.0.0.1:7799 npx tsx scripts/captureScreenshots.ts
 ```
 
-Writes the six PNGs into `docs/stills/`. It records the human decision by clicking the
+Writes the seven PNGs into `docs/stills/`. It records the human decision by clicking the
 UI's own decision button, so **re-run step 3 afterwards** to leave the store pristine.
 
-Open `docs/stills/gallery.html` in a browser to review all six at once — it uses relative
+Open `docs/stills/gallery.html` in a browser to review all seven at once — it uses relative
 paths, so it works straight from the filesystem with no server.
 
 ## 11. Known recording risks

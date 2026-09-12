@@ -169,7 +169,7 @@ class ToolUseRecordingModel extends Model {
 }
 
 describe("ShiftContinuityAgent", () => {
-  it("registers the four typed application tools and system prompt on the real Strands loop", async () => {
+  it("registers the typed application tools and system prompt on the real Strands loop", async () => {
     const { store, shift } = makeStore();
     const tools = createShiftContinuityTools({
       store,
@@ -187,9 +187,16 @@ describe("ShiftContinuityAgent", () => {
       "get_shift_state",
       "get_handoff",
       "record_human_decision",
+      "reopen_human_decision",
     ]);
     assert.equal(model.systemPrompt, SHIFT_CONTINUITY_SYSTEM_PROMPT);
-    assert.deepEqual(runner.toolNames, ["report_event", "get_shift_state", "get_handoff", "record_human_decision"]);
+    assert.deepEqual(runner.toolNames, [
+      "report_event",
+      "get_shift_state",
+      "get_handoff",
+      "record_human_decision",
+      "reopen_human_decision",
+    ]);
   });
 
   it("routes a routine report through report_event and exposes deterministic state", async () => {
@@ -435,6 +442,147 @@ describe("ShiftContinuityAgent", () => {
     assert.match(trace?.summary ?? "", /explicit human decision/i);
     assert.equal(store.getEvents(shift.id).length, 2);
     assert.equal(store.getShiftState(shift.id)?.items[0]?.status, "conflicted");
+  });
+
+  describe("reopen authorization is model-independent", () => {
+    function seedDecidedDecision(store: JsonFileShiftStore, shiftId: string): void {
+      store.appendEvent(validateEvent({
+        id: "decision-1",
+        shiftId,
+        occurredAt: "2026-09-08T05:40:00Z",
+        kind: "decision_recorded",
+        subject: "damaged case D104",
+        description: "human decision",
+        claim: "send to claims",
+        source: "human",
+        actor: "Shift Supervisor",
+      }));
+    }
+
+    it("refuses a reopen the model attempts with no human authorization", async () => {
+      const { store, shift } = makeStore();
+      seedConflict(store, shift.id);
+      seedDecidedDecision(store, shift.id);
+      const tools = createShiftContinuityTools({
+        store,
+        shiftId: shift.id,
+        interpreter: new DeterministicEventInterpreter(),
+      });
+      const model = new ToolUseRecordingModel({ toolName: "reopen_human_decision", toolInput: { subject: "D104" } });
+      const runner = new StrandsAgentRunner({ tools, model, bedrock: { provider: "bedrock" } });
+
+      await runner.invoke("Was D104 decided correctly?", { routingIntent: "reopen" });
+
+      const trace = tools.getTrace()[0];
+      assert.equal(trace?.tool, "reopen_human_decision");
+      assert.equal(trace?.status, "error");
+      assert.match(trace?.summary ?? "", /human authorization/i);
+      assert.equal(store.getEvents(shift.id).length, 3, "a refused reopen appends nothing");
+      assert.equal(store.getShiftState(shift.id)?.items[0]?.status, "decided");
+    });
+
+    it("allows a pre-authorized reopen and keeps the superseded decision on the record", async () => {
+      const { store, shift } = makeStore();
+      seedConflict(store, shift.id);
+      seedDecidedDecision(store, shift.id);
+      const tools = createShiftContinuityTools({
+        store,
+        shiftId: shift.id,
+        interpreter: new DeterministicEventInterpreter(),
+        now: () => "2026-09-08T06:05:00Z",
+      });
+      const model = new ToolUseRecordingModel({ toolName: "reopen_human_decision", toolInput: { subject: "D104" } });
+      const runner = new StrandsAgentRunner({ tools, model, bedrock: { provider: "bedrock" } });
+
+      await runner.invoke("Reopen D104 because the disposal record was wrong", {
+        routingIntent: "reopen",
+        reopenAuthorization: {
+          subject: "D104",
+          canonicalSubject: "d104",
+          actor: "Shift Supervisor",
+          reason: "the disposal record was wrong",
+        },
+      });
+
+      const trace = tools.getTrace()[0];
+      assert.equal(trace?.status, "success");
+      assert.equal(store.getEvents(shift.id).length, 4);
+      const state = store.getShiftState(shift.id);
+      assert.equal(state?.items[0]?.status, "conflicted");
+      assert.equal(state?.items[0]?.decision?.canonicalValue, "claims", "the prior decision stays visible");
+    });
+  });
+
+  describe("actor provenance comes from the application context", () => {
+    function seedDecidedDecision(store: JsonFileShiftStore, shiftId: string): void {
+      store.appendEvent(validateEvent({
+        id: "decision-1",
+        shiftId,
+        occurredAt: "2026-09-08T05:40:00Z",
+        kind: "decision_recorded",
+        subject: "damaged case D104",
+        description: "human decision",
+        claim: "send to claims",
+        source: "human",
+        actor: "Shift Supervisor",
+      }));
+    }
+
+    it("attributes an agent-routed decision to the actor the application supplied", async () => {
+      const { store, shift } = makeStore();
+      seedConflict(store, shift.id);
+      const agent = createShiftContinuityAgent({
+        store,
+        shiftId: shift.id,
+        interpreter: new DeterministicEventInterpreter(),
+        now: () => "2026-09-08T05:40:00Z",
+      });
+
+      const result = await agent.invoke("Send D104 to claims.", { actor: "Shift Supervisor" });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.decision?.actor, "Shift Supervisor");
+      assert.equal(store.getEvents(shift.id).at(-1)?.actor, "Shift Supervisor");
+    });
+
+    it("reopens through the agent, recording the actor and reason on the event", async () => {
+      const { store, shift } = makeStore();
+      seedConflict(store, shift.id);
+      seedDecidedDecision(store, shift.id);
+      const agent = createShiftContinuityAgent({
+        store,
+        shiftId: shift.id,
+        interpreter: new DeterministicEventInterpreter(),
+        now: () => "2026-09-08T06:05:00Z",
+      });
+
+      const result = await agent.invoke("Reopen D104 because the disposal record was wrong", { actor: "Shift Supervisor" });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.item?.status, "conflicted");
+      const event = store.getEvents(shift.id).at(-1);
+      assert.equal(event?.kind, "decision_reopened");
+      assert.equal(event?.actor, "Shift Supervisor");
+      assert.equal(event?.note, "the disposal record was wrong");
+    });
+
+    it("does not authorize a reopen when the application supplies no actor", async () => {
+      const { store, shift } = makeStore();
+      seedConflict(store, shift.id);
+      seedDecidedDecision(store, shift.id);
+      const agent = createShiftContinuityAgent({
+        store,
+        shiftId: shift.id,
+        interpreter: new DeterministicEventInterpreter(),
+      });
+
+      const result = await agent.invoke("Reopen D104");
+
+      assert.equal(result.ok, false);
+      assert.match(result.error ?? "", /human authorization/i);
+      assert.equal(store.getEvents(shift.id).length, 3);
+      assert.equal(store.getShiftState(shift.id)?.items[0]?.status, "decided");
+    });
   });
 
   it("does not claim success when report_event fails", async () => {

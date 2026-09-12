@@ -7,6 +7,7 @@ const EVENT_KINDS: readonly EventKind[] = [
   "work_completed",
   "status_claimed",
   "decision_recorded",
+  "decision_reopened",
 ];
 
 function isNonEmptyString(value: unknown): value is string {
@@ -53,6 +54,15 @@ export function validateEvent(candidate: unknown): OperationalEvent {
   if (event.kind === "status_claimed" || event.kind === "decision_recorded") {
     if (!isNonEmptyString(event.claim)) {
       throw new ValidationError(`event kind "${event.kind}" requires a non-empty "claim"`);
+    }
+  }
+
+  // Provenance is optional (pre-provenance decisions must stay readable) but
+  // present-but-blank is refused: an empty actor would look attributed in the
+  // audit trail while naming nobody.
+  for (const field of ["actor", "note"] as const) {
+    if (field in e && e[field] !== undefined && !isNonEmptyString(e[field])) {
+      throw new ValidationError(`event field "${field}" must be a non-empty string when present`);
     }
   }
 

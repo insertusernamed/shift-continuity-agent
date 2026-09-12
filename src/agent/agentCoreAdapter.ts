@@ -28,6 +28,8 @@ export interface AgentCoreRequest {
   prompt?: string;
   message?: string;
   shiftId?: string;
+  /** Who the request acts on behalf of; required for attributed human actions. */
+  actor?: string;
 }
 
 export interface AgentCoreInvocationEnvelope {
@@ -60,6 +62,7 @@ export function createAgentCoreRequestSchema() {
       prompt: z.string().optional(),
       message: z.string().optional(),
       shiftId: z.string().optional(),
+      actor: z.string().optional(),
     })
     .refine((data) => (data.message ?? data.prompt ?? "").trim().length > 0, {
       message: "a non-empty 'prompt' or 'message' is required",
@@ -72,7 +75,7 @@ export function createAgentCoreRequestSchema() {
  * request with no usable text; the runtime maps that to a 400 before the
  * model is ever called.
  */
-export function parseAgentCoreInvocationRequest(raw: unknown): { userText: string; shiftId?: string } {
+export function parseAgentCoreInvocationRequest(raw: unknown): { userText: string; shiftId?: string; actor?: string } {
   const schema = createAgentCoreRequestSchema();
   const parsed = schema.safeParse(raw);
   if (!parsed.success) {
@@ -82,7 +85,8 @@ export function parseAgentCoreInvocationRequest(raw: unknown): { userText: strin
   if (!userText) {
     throw new Error("AgentCore request must include a non-empty 'prompt' or 'message'");
   }
-  return { userText, shiftId: parsed.data.shiftId };
+  const actor = parsed.data.actor?.trim();
+  return { userText, shiftId: parsed.data.shiftId, ...(actor ? { actor } : {}) };
 }
 
 /** One AgentCore context: a store plus the shift it operates on. */
@@ -186,6 +190,8 @@ export interface InvokeAgentCoreShiftOptions {
   store: ShiftStore;
   shiftId: string;
   userText: string;
+  /** Display identity for any human action this invocation performs. */
+  actor?: string;
   interpreter?: EventInterpreter;
   mode?: AgentMode;
   bedrock?: BedrockAgentConfig;
@@ -211,7 +217,7 @@ export async function invokeAgentCoreShift(
     bedrock: options.bedrock,
     runner: options.runner,
   });
-  const result = await agent.invoke(options.userText);
+  const result = await agent.invoke(options.userText, options.actor ? { actor: options.actor } : undefined);
   const envelope: AgentCoreInvocationEnvelope = {
     result: result.response,
     ok: result.ok,

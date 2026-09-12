@@ -12,6 +12,7 @@ import {
 } from "./agentCoreAdapter.ts";
 import { DeterministicEventInterpreter } from "../ingest/interpreter.ts";
 import { createDemoShift } from "../demo/demo.ts";
+import { canonicalClaim } from "../domain/claims.ts";
 import { InMemoryShiftStore } from "../store/inMemoryStore.ts";
 import type { ShiftStore } from "../store/jsonFileStore.ts";
 
@@ -298,5 +299,68 @@ describe("AgentCore invocation envelope (deterministic runner, network-free)", (
     });
     assert.equal(envelope.ok, false);
     assert.ok(envelope.error);
+  });
+
+  it("attributes a remote decision to the actor carried in the invocation request", async () => {
+    const { store, shiftId } = seededStore();
+    const envelope = await invokeAgentCoreShift({
+      store,
+      shiftId,
+      userText: "Send D104 to claims.",
+      actor: "Shift Supervisor",
+      interpreter,
+      mode: "deterministic",
+    });
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.decision?.actor, "Shift Supervisor");
+    const decision = store.getEvents(shiftId).find((e) => e.kind === "decision_recorded");
+    assert.equal(decision?.actor, "Shift Supervisor");
+    // The event stores the selected claim (canonical "claims"), not the request
+    // prose — the remote smoke's readback relies on exactly this contract.
+    assert.equal(canonicalClaim(decision?.claim ?? ""), "claims");
+  });
+
+  it("reopens a decision remotely when the request names the actor, keeping the prior decision", async () => {
+    const { store, shiftId } = seededStore();
+    await invokeAgentCoreShift({ store, shiftId, userText: "Send D104 to claims.", actor: "Shift Supervisor", interpreter, mode: "deterministic" });
+
+    const envelope = await invokeAgentCoreShift({
+      store,
+      shiftId,
+      userText: "Reopen D104 because the disposal record was wrong",
+      actor: "Shift Supervisor",
+      interpreter,
+      mode: "deterministic",
+    });
+
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.toolTrace[0]?.tool, "reopen_human_decision");
+    assert.equal(envelope.toolTrace[0]?.status, "success");
+    assert.equal(envelope.item?.status, "conflicted");
+    assert.equal(envelope.item?.decision?.canonicalValue, "claims");
+
+    const reopened = store.getEvents(shiftId).find((e) => e.kind === "decision_reopened");
+    assert.equal(reopened?.actor, "Shift Supervisor");
+    assert.equal(reopened?.note, "the disposal record was wrong");
+  });
+
+  it("refuses a remote reopen that supplies no actor", async () => {
+    const { store, shiftId } = seededStore();
+    await invokeAgentCoreShift({ store, shiftId, userText: "Send D104 to claims.", actor: "Shift Supervisor", interpreter, mode: "deterministic" });
+    const before = store.getEvents(shiftId).length;
+
+    const envelope = await invokeAgentCoreShift({
+      store,
+      shiftId,
+      userText: "Reopen D104",
+      interpreter,
+      mode: "deterministic",
+    });
+
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.toolTrace[0]?.status, "error");
+    assert.match(envelope.error ?? "", /human authorization/i);
+    assert.equal(store.getEvents(shiftId).length, before);
+    assert.equal(store.getShiftState(shiftId)?.items.find((i) => i.canonicalSubject === "d104")?.status, "decided");
   });
 });

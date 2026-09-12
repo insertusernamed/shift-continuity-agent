@@ -1,6 +1,6 @@
 # AI video prompts
 
-Image-to-video prompts for the six stills in [`stills/`](stills/), for tools such as
+Image-to-video prompts for the seven stills in [`stills/`](stills/), for tools such as
 Runway, Veo, Pika, or Kling. The final video is **not** generated in this repository;
 this file only supplies prompts, camera moves, durations, and placement.
 
@@ -50,11 +50,11 @@ use them as punch-ins inside the full-frame screen recording.
 
 ## 4. `stills/04-decision-recorded.png` — 2880×1620, 16:9
 
-- **Shows:** The same item after the human decision: DECIDED.
-- **16:9 usage:** Native. Crop toward the D104 card to emphasise the badge change.
-- **Duration:** 4 s
-- **Motion prompt:** *"Static UI screenshot. A status badge transitions from red CONFLICT to blue DECIDED with one soft highlight sweep, and the card's border eases from red to blue. Nothing else moves."*
-- **Camera motion:** Static with a barely perceptible drift.
+- **Shows:** The same item after the human decision: DECIDED, with `Recorded by Shift Supervisor` and the reopen action.
+- **16:9 usage:** Native. Crop toward the D104 card to emphasise the badge change and the attribution line.
+- **Duration:** 5 s (the attribution line is worth the extra beat)
+- **Motion prompt:** *"Static UI screenshot. A status badge transitions from red CONFLICT to blue DECIDED with one soft highlight sweep, and the card's border eases from red to blue. A second, fainter highlight settles on the line naming who recorded it. Nothing else moves; text stays sharp."*
+- **Camera motion:** Static with a barely perceptible drift, then a slow push in on the attribution line.
 - **Transition:** Cut to the handoff on the badge landing.
 - **Overlay text:** `A human decided. The event log recorded it.`
 - **Placement:** **Transition** — the human-in-the-loop beat.
@@ -80,6 +80,22 @@ use them as punch-ins inside the full-frame screen recording.
 - **Transition:** Whip-free cut back to the wider UI, or dissolve.
 - **Overlay text:** `Photos are evidence — interpreted as a note, never as truth.`
 - **Placement:** **Transition** during the photo-evidence beat.
+
+---
+
+## 7. `stills/07-decision-reopened.png` — 2880×1620, 16:9 (optional)
+
+Only used if the edit includes the reopen beat (`docs/RECORDING_GUIDE.md` §7, optional
+ninth beat). The main cut is complete without it.
+
+- **Shows:** The same item after the decision is reopened: back to CONFLICT, the superseded claim still listed, `Reopened by Shift Supervisor — "Claims ticket was created in error"`, and both claim buttons available again.
+- **16:9 usage:** Native. Crop toward the D104 card so the attribution line and the recovery of the claim buttons are both legible.
+- **Duration:** 5 s
+- **Motion prompt:** *"Static UI screenshot. A status badge transitions from blue DECIDED to red CONFLICT with one soft highlight sweep, and a muted 'reopened' label and a quoted reason fade in beneath it. Two suppressed buttons return to full opacity. Nothing else moves."*
+- **Camera motion:** Gentle pull back from the attribution line to reveal the whole card.
+- **Transition:** Cut on the moment the claim buttons return, or dissolve to the handoff.
+- **Overlay text:** `Undo is an append, not a rewrite.`
+- **Placement:** **Transition** — between the decision beat and the handoff payoff.
 
 ---
 

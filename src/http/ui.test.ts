@@ -78,10 +78,53 @@ describe("UI shell accessibility", () => {
   });
 
   it("announces dynamic results through live regions that exist up front", () => {
-    for (const id of ["agentReply", "agentTrace", "photoResult", "nlResult"]) {
+    for (const id of ["agentReply", "agentTrace", "photoResult", "nlResult", "mutationResult"]) {
       assert.match(html, new RegExp(`id="${id}"[^>]*aria-live="polite"`), `#${id} must be a polite live region`);
     }
     assert.match(html, /id="error" class="alert" role="alert"/);
+    // A live region that is display:none while empty is not reliably announced,
+    // so the mutation region collapses to zero height instead of being hidden.
+    assert.doesNotMatch(html, /\.mutation:empty \{[^}]*display: none/);
+  });
+
+  it("names the acting human and records them on human actions", () => {
+    assert.match(html, /<label class="field__label" for="actor">Acting as<\/label>/);
+    assert.match(html, /id="actor" type="text" value="Shift Supervisor"/);
+    // The client must send the actor with both human-authority requests.
+    assert.match(html, /actor: currentActor\(\)/);
+    assert.match(html, /function currentActor\(\)/);
+  });
+
+  it("offers a labelled reopen action for a decided item", () => {
+    assert.match(html, /class="btn reopenBtn"/);
+    assert.match(html, /Reopen decision/);
+    assert.match(html, /for="reopenReason-\$\{safeId\(item\.canonicalSubject\)\}">Reason \(optional\)/);
+    assert.match(html, /id="reopenReason-\$\{safeId\(item\.canonicalSubject\)\}"/);
+    // Reopening is offered only on decided items, and never on a conflict.
+    assert.match(html, /item\.status === "decided"/);
+  });
+
+  it("shows decision provenance and marks a reopened decision as superseded", () => {
+    assert.match(html, /card__provenance/);
+    assert.match(html, /Recorded by <b>/);
+    assert.match(html, /card__decision--superseded/);
+    assert.match(html, /Reopened/);
+    // A reopened item explains itself: who undid the decision, and why.
+    assert.match(html, /function reopenProvenanceLine\(item\)/);
+    assert.match(html, /Reopened by <b>/);
+    assert.match(html, /item\.reopened\.note/);
+  });
+
+  it("shows who authorized a human action in the append-only history", () => {
+    assert.match(html, /event\.actor \|\| event\.note/);
+    assert.match(html, /by <b>\$\{esc\(event\.actor\)\}<\/b>/);
+  });
+
+  it("locks human-action buttons while a mutation is in flight", () => {
+    assert.match(html, /async function withBusy\(buttons, work\)/);
+    assert.match(html, /button\.setAttribute\("aria-busy", "true"\)/);
+    assert.match(html, /\.btn\[aria-busy="true"\]/);
+    assert.match(html, /querySelectorAll\("\.decisionBtn, \.reopenBtn"\)/);
   });
 
   it("is fully keyboard operable and respects reduced motion", () => {
@@ -136,6 +179,7 @@ describe("UI shell accessibility", () => {
       ["secondary text", "ink-2", "surface-1"],
       ["secondary text on inset", "ink-2", "surface-2"],
       ["secondary text on conflict", "ink-2", "conflict-bg"],
+      ["secondary text on decided", "ink-2", "decided-bg"],
       ["meta text", "ink-3", "surface-1"],
       ["meta text on page", "ink-3", "surface-0"],
       ["meta text on inset", "ink-3", "surface-2"],

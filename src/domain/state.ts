@@ -2,6 +2,7 @@ import type {
   DispositionClaim,
   OperationalEvent,
   OperationalItem,
+  ReopenRecord,
   Shift,
   ShiftState,
   ItemStatus,
@@ -28,6 +29,9 @@ import { canonicalClaim } from "./claims.ts";
  *   "conflicted" until an explicit decision reconciles it.
  * - A genuinely newer problem report reopens a resolved item; that is a
  *   new fact, not an old one overwriting new state.
+ * - A decision is sticky against ordinary reports, and can only be undone by
+ *   an explicit, human-authorized reopen event. That event flips the item back
+ *   to conflicted and leaves the superseded decision on the item for audit.
  */
 export function foldState(shift: Shift, events: OperationalEvent[]): ShiftState {
   const chronological = [...events].sort(
@@ -77,7 +81,7 @@ function applyEvent(items: Map<string, OperationalItem>, event: OperationalEvent
 
   if (!item) {
     const category: ItemCategory =
-      event.kind === "status_claimed" || event.kind === "decision_recorded"
+      event.kind === "status_claimed" || event.kind === "decision_recorded" || event.kind === "decision_reopened"
         ? "disposition"
         : "issue";
     item = newItem(event, category);
@@ -93,6 +97,8 @@ function applyEvent(items: Map<string, OperationalItem>, event: OperationalEvent
       item.decision = toClaim(event);
       item.status = "decided";
     }
+    // A reopen as the very first event for a subject has no decision to undo,
+    // so the item stays open rather than being flipped into a conflict.
     items.set(key, item);
     return;
   }
@@ -127,10 +133,28 @@ function applyEvent(items: Map<string, OperationalItem>, event: OperationalEvent
       break;
     }
     case "decision_recorded": {
-      // First decision wins; later decision events remain in history only.
+      // A decision settles the item, including after an explicit reopen. Once
+      // decided, later decision events remain in history only.
       if (item.status !== "decided") {
         item.decision = toClaim(event);
         item.status = "decided";
+        // The reopen it settles is no longer outstanding.
+        delete item.reopened;
+      }
+      break;
+    }
+    case "decision_reopened": {
+      // The only path back out of "decided". Guarded by the decision gate
+      // before it is ever appended; the fold stays defensive because events are
+      // the only truth, and a stray reopen must not manufacture a conflict.
+      // The superseded decision is deliberately left on the item so the audit
+      // trail survives the transition.
+      if (item.status === "decided") {
+        item.status = "conflicted";
+        const reopened: ReopenRecord = { eventId: event.id, occurredAt: event.occurredAt };
+        if (event.actor) reopened.actor = event.actor;
+        if (event.note) reopened.note = event.note;
+        item.reopened = reopened;
       }
       break;
     }
@@ -139,12 +163,15 @@ function applyEvent(items: Map<string, OperationalItem>, event: OperationalEvent
 
 function toClaim(event: OperationalEvent): DispositionClaim {
   const raw = event.claim!;
-  return {
+  const claim: DispositionClaim = {
     eventId: event.id,
     value: raw,
     canonicalValue: canonicalClaim(raw),
     occurredAt: event.occurredAt,
   };
+  if (event.actor) claim.actor = event.actor;
+  if (event.note) claim.note = event.note;
+  return claim;
 }
 
 /** Two different canonical concepts for the same subject are contradictory. */

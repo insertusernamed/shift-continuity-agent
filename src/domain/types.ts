@@ -16,7 +16,9 @@ export type EventKind =
   /** A neutral assertion of a value, e.g. a disposition claim ("send to claims"). */
   | "status_claimed"
   /** A human reconciled an item/conflict or decided its outcome. */
-  | "decision_recorded";
+  | "decision_recorded"
+  /** A human explicitly reopened a prior decision; the item returns to conflicted. */
+  | "decision_reopened";
 
 /** Lifecycle of an operational item. */
 export type ItemStatus =
@@ -64,6 +66,15 @@ export interface OperationalEvent {
   blockedBy?: string;
   /** Optional photo evidence attached to this report (see EvidenceAttachment). */
   evidence?: EvidenceAttachment[];
+  /**
+   * Who authorized a human action (decision_recorded / decision_reopened), as a
+   * display identity such as "Shift Supervisor". Supplied by the application
+   * from the current human context; never invented by a model, and optional so
+   * decisions recorded before provenance existed stay readable.
+   */
+  actor?: string;
+  /** Optional human-supplied reason recorded with a decision or reopen. */
+  note?: string;
 }
 
 /** One asserted value attached to a disposition item. */
@@ -74,6 +85,20 @@ export interface DispositionClaim {
   /** Canonical concept used for conflict comparison (see claims.ts). */
   canonicalValue: string;
   occurredAt: string;
+  /** Provenance, present when the claim came from an attributed human action. */
+  actor?: string;
+  note?: string;
+}
+
+/**
+ * A recorded reopening of a decision. Kept on the item so the reason behind an
+ * undo is readable without re-deriving it from the event log.
+ */
+export interface ReopenRecord {
+  eventId: string;
+  occurredAt: string;
+  actor?: string;
+  note?: string;
 }
 
 /**
@@ -95,8 +120,13 @@ export interface OperationalItem {
   contributingEventIds: string[];
   /** Populated for disposition items; contradictory claims are all kept. */
   claims: DispositionClaim[];
-  /** Present once a human decision reconciled the item. */
+  /**
+   * Present once a human decision reconciled the item. After an explicit
+   * reopen this holds the superseded decision, so the audit trail stays intact.
+   */
   decision?: DispositionClaim;
+  /** Present only while a decided item is reopened and awaiting a new decision. */
+  reopened?: ReopenRecord;
   blockedByCanonicalSubject?: string;
   resolvedAt?: string;
   resolvedByEventId?: string;

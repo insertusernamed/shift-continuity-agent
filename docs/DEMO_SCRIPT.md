@@ -52,6 +52,15 @@ Record the 30-second cut if the submission form limits you; otherwise use the 3:
 5. **The human decision, then the handoff** — `Send D104 to claims.` authorizes the
    decision; the handoff collapses to the one open item, the missed freezer inspection.
 
+**Optional sixth beat (secondary).** On the DECIDED D104 card, put
+`Claims ticket was created in error` in **Reason (optional)** and click **Reopen decision**.
+D104 returns to CONFLICT with the superseded decision still on the record and the reopen
+attributed to whoever is named in **Acting as**; click **send to claims** to settle it again.
+This is the audit-trail beat — a decision is undone by appending, never by rewriting. The
+main 3:45 script does not need it; see the optional shot in
+[`SHOT_LIST.md`](SHOT_LIST.md) and the optional ninth beat in
+[`RECORDING_GUIDE.md`](RECORDING_GUIDE.md).
+
 Narration, timings, framing, and which still belongs to each beat: [`SHOT_LIST.md`](SHOT_LIST.md).
 
 ## Delivery notes

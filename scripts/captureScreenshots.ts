@@ -92,7 +92,9 @@ try {
     [...document.querySelectorAll(".decisionBtn")].find(b => b.textContent.includes("claims")).click();
   `);
   await waitFor(cdp, `document.querySelector("#stateList .card--decided") !== null`);
-  await scrollTo(cdp, "#stateSection");
+  // Centre the decided card rather than the panel: the card carries the decision,
+  // who recorded it, and the reopen action, and the rail is taller than the frame.
+  await scrollToCenter(cdp, ".card--decided");
   await shoot(cdp, "04-decision-recorded.png");
 
   // 5. Final handoff: the conflict is gone, one open item remains.
@@ -102,7 +104,18 @@ try {
   await scrollTo(cdp, "#historySection");
   await shootElement(cdp, ".evidence", "06-photo-evidence.png");
 
-  console.log(`Captured 6 stills into ${OUT_DIR}/`);
+  // 7. Optional secondary beat: reopening the decision puts it back under human
+  // review, with the superseded decision and the reason still on the record.
+  await evaluate(cdp, `(() => {
+    const reason = document.querySelector("input[id^='reopenReason-']");
+    if (reason) reason.value = "Claims ticket was created in error";
+    document.querySelector(".reopenBtn")?.click();
+  })()`);
+  await waitFor(cdp, `document.querySelector("#stateList .card--conflicted") !== null`);
+  await scrollToCenter(cdp, ".card--conflicted");
+  await shoot(cdp, "07-decision-reopened.png");
+
+  console.log(`Captured 7 stills into ${OUT_DIR}/`);
 } finally {
   chrome.kill();
 }
@@ -201,6 +214,12 @@ async function scrollToTop(cdp: Cdp): Promise<void> {
 
 async function scrollTo(cdp: Cdp, selector: string): Promise<void> {
   await evaluate(cdp, `document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: "start", behavior: "instant" })`);
+  await settle(cdp);
+}
+
+/** Centre a single element, for cards whose full height matters in frame. */
+async function scrollToCenter(cdp: Cdp, selector: string): Promise<void> {
+  await evaluate(cdp, `document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: "center", behavior: "instant" })`);
   await settle(cdp);
 }
 

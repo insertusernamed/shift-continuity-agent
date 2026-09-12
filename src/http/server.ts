@@ -4,7 +4,7 @@ import type { ShiftStore } from "../store/jsonFileStore.ts";
 import { StoreError } from "../store/jsonFileStore.ts";
 import { ValidationError } from "../domain/validate.ts";
 import { buildHandoff } from "../domain/handoff.ts";
-import { recordableDecision, DecisionValidationError } from "../domain/decide.ts";
+import { recordableDecision, reopenableDecision, DecisionValidationError } from "../domain/decide.ts";
 import { canonicalSubject } from "../domain/subjects.ts";
 import { createDemoShift } from "../demo/demo.ts";
 import { DeterministicEventInterpreter, InterpretationError, ProviderError, type EventInterpreter } from "../ingest/interpreter.ts";
@@ -144,11 +144,13 @@ async function handle(
     if (method === "POST") {
       const body = await readJson(req, res);
       if (body === undefined) return;
-      if (body.kind === "decision_recorded") {
-        // Decisions are gated: they must pass the human-review validation
-        // endpoint, not arrive as raw events (§7 — no silent state mutation).
+      if (body.kind === "decision_recorded" || body.kind === "decision_reopened") {
+        // Human-authority events are gated: they must pass the decision/reopen
+        // validation endpoints, not arrive as raw events (§7 — no silent state
+        // mutation, and no anonymous human action).
+        const route = body.kind === "decision_recorded" ? "decision" : "reopen";
         return sendJson(res, 400, {
-          error: "decision_recorded events must go through POST /api/shifts/:id/items/:subject/decision",
+          error: `${body.kind} events must go through POST /api/shifts/:id/items/:subject/${route}`,
         });
       }
       try {
@@ -289,9 +291,13 @@ async function handle(
     if (body === undefined) return;
     const message = typeof body.message === "string" ? body.message.trim() : "";
     if (!message) return sendJson(res, 400, { error: "message is required" });
+    // Who the request acts on behalf of. Optional here (the agent still refuses
+    // any human action without it) but required in practice for attributed
+    // decisions and reopens.
+    const actor = typeof body.actor === "string" ? body.actor.trim() : "";
     try {
       const agent = createShiftContinuityAgent({ store, shiftId, interpreter, mode: bedrock ? "bedrock" : "deterministic", bedrock });
-      const result = await agent.invoke(message);
+      const result = await agent.invoke(message, actor ? { actor } : undefined);
       sendJson(res, result.ok ? 200 : 502, result);
     } catch (err) {
       // Agent construction/loop failures are upstream-of-tool: controlled 502,
@@ -347,26 +353,62 @@ async function handle(
         claim: body.claim,
         eventId: crypto.randomUUID(),
         occurredAt: new Date().toISOString(),
+        ...(typeof body.actor === "string" ? { actor: body.actor } : {}),
+        ...(typeof body.note === "string" ? { note: body.note } : {}),
       });
       store.appendEvent(decision);
       const updated = store.getShiftState(shiftId);
       const item = updated?.items.find((i) => i.canonicalSubject === canonicalSubject(subject));
       sendJson(res, 200, { event: decision, item });
     } catch (err) {
-      if (err instanceof DecisionValidationError) {
-        const status =
-          err.code === "item_not_found" ? 404
-          : err.code === "item_not_conflicted" || err.code === "already_decided" ? 409
-          : 400;
-        return sendJson(res, status, { error: err.message, code: err.code });
-      }
-      // Includes StoreError "shift has ended" → 409 via the shared mapping.
-      sendDomainError(res, err);
+      sendDecisionError(res, err);
+    }
+    return;
+  }
+
+  // POST /api/shifts/:id/items/:subject/reopen — a human explicitly undoes the
+  // decision on one decided item. Like a decision, this is validated against
+  // the current folded state and appended as an ordinary event; the prior
+  // decision is never edited or removed.
+  if (sub === "items" && parts[5] === "reopen" && method === "POST") {
+    const subject = decodeURIComponent(parts[4] ?? "");
+    const body = await readJson(req, res);
+    if (body === undefined) return;
+    const state = store.getShiftState(shiftId);
+    if (!state) return sendJson(res, 404, { error: "unknown shift" });
+    try {
+      const reopened = reopenableDecision({
+        state,
+        subject,
+        actor: typeof body.actor === "string" ? body.actor : "",
+        ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
+        eventId: crypto.randomUUID(),
+        occurredAt: new Date().toISOString(),
+      });
+      store.appendEvent(reopened);
+      const updated = store.getShiftState(shiftId);
+      const item = updated?.items.find((i) => i.canonicalSubject === canonicalSubject(subject));
+      sendJson(res, 200, { event: reopened, item });
+    } catch (err) {
+      sendDecisionError(res, err);
     }
     return;
   }
 
   sendJson(res, 404, { error: "not found" });
+}
+
+function sendDecisionError(res: ServerResponse, err: unknown): void {
+  if (err instanceof DecisionValidationError) {
+    const status =
+      err.code === "item_not_found" ? 404
+      : err.code === "item_not_conflicted" || err.code === "already_decided" || err.code === "item_not_decided" ? 409
+      : 400;
+    sendJson(res, status, { error: err.message, code: err.code });
+    return;
+  }
+  // Includes StoreError "shift has ended" → 409 via the shared mapping.
+  sendDomainError(res, err);
 }
 
 function sendDomainError(res: ServerResponse, err: unknown): void {
