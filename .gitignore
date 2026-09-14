@@ -11,3 +11,11 @@ data/
 
 # Local agent tooling state
 .freebuff/
+
+# Video production workspace and screen-capture artifacts. Large, and not part of
+# the published product source; they stay on disk but out of the repository.
+video/
+docs/video/
+scripts/video-recording/
+thumbnail.png
+docs/stills/08-persistence-readback.png
