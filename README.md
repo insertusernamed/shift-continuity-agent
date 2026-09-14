@@ -36,6 +36,24 @@ log. The domain reasoning has no LLM, database, or web framework in its dependen
 [Devpost draft](./docs/DEVPOST_DRAFT.md) ·
 [MIT license](./LICENSE)
 
+## Architecture at a glance
+
+![Architecture of Shift Handoff. A human reports through a Strands agent whose typed tools
+feed a deterministic domain lane: validation, append-only operational events, the durable
+Amazon DynamoDB log, a chronological fold, then current state and the handoff. A separate
+human-only authority path enters the log through the decision gate.](docs/architecture.png)
+
+The model lane proposes; the domain lane decides. A report arrives as natural language (or a
+photo plus a note) and leaves the model only as a **candidate event** — validated locally
+before anything is appended, and structurally unable to carry an id or a timestamp. Everything
+durable is an event: current state is re-derived by folding them in order, so it cannot drift
+from history. The one path that bypasses the model entirely is the human decision gate, which
+is why a conflict can only be settled by a person.
+
+Source: [`docs/architecture.html`](./docs/architecture.html) — regenerate the PNG with
+`npm run diagram`. The same boundaries in text form, with data-flow and conflict/reopen
+sequence diagrams, are in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
+
 ## Demo in one minute
 
 ```bash
@@ -231,9 +249,9 @@ agent, tools, deterministic fold, and decision gate — AgentCore only hosts it.
 | --- | --- | --- |
 | Entrypoint | `src/main.ts` (`npm run dev`) | `app/ShiftContinuityAgent/main.ts` (CodeZip) |
 | Protocol | project HTTP API (`/api/...`) | AgentCore `/invocations` + `/ping` |
-| Persistence | JSON file (`data/shifts.json`), survives restart | in-process memory, **resets on cold start** |
+| Persistence | JSON file (`data/shifts.json`), survives restart | **Amazon DynamoDB** append-only event log, survives cold starts (see [Persistence](#persistence)); `SHIFT_STORE=memory` is available but ephemeral |
 | Model credentials | local AWS credential chain | runtime execution role |
-| State | seeded demo shift per AgentCore session | seeded demo shift per AgentCore session |
+| Which shift | the one in the JSON file (`GET /api/shifts`) | the one the invocation names (`shiftId`); an ephemeral session has only its own seeded demo shift |
 
 Both paths use `src/agent/*` and `src/domain/*` unchanged.
 
@@ -431,6 +449,13 @@ camera moves, and intro/outro placement are in
 [`docs/AI_VIDEO_PROMPTS.md`](./docs/AI_VIDEO_PROMPTS.md); the shot-by-shot plan is in
 [`docs/SHOT_LIST.md`](./docs/SHOT_LIST.md).
 
+### Stores are read once, at startup
+
+`JsonFileShiftStore` reads its file when the process starts and holds it in memory, so
+**resetting the demo state while the app is running has no effect** — stop the app, run
+`resetDemo.ts`, start it again, then reload the browser. The recording instructions in
+[`docs/RECORDING_GUIDE.md`](./docs/RECORDING_GUIDE.md) are built around that.
+
 ## Design and accessibility
 
 The UI is one server-rendered page with no framework and no build step. It is designed as
@@ -521,7 +546,7 @@ so the system fully works with no LLM configured.
 - Local Strands integration: one `ShiftContinuityAgent` (`@strands-agents/sdk`) orchestrating the deterministic system through five typed tools, with an offline deterministic runner as fallback and per-invocation tool traces for demos. Explicit provider selection (`AGENT_MODEL_PROVIDER`): `bedrock` (Nova via `BedrockModel` Converse, `ca.amazon.nova-lite-v1:0` by default) or `bedrock-openai` (GPT-5.6 Luna via the SDK's OpenAI Responses model on the bedrock-runtime OpenAI-compatible endpoint, `global.openai.gpt-5.6-luna` by default), both authenticated through the normal AWS credential chain.
 - Deterministic normalization to cut false conflicts: subject canonicalization (configured aliases + narrow `"damaged case D104" → "d104"` shape) and claim normalization (explicit disposition vocabulary, unknown claims kept as normalized raw text).
 - Photo evidence: an image plus a note can be attached to a report; the note rides the normal interpretation/validation pipeline while the image is stored locally (`EvidenceStore`) and shown as evidence on the event in history. No model sees the pixels.
-- AgentCore deployment: the same Strands agent hosted on Amazon Bedrock AgentCore Runtime (CodeZip, `ca-central-1`), invoked through the AgentCore `/invocations` protocol with a JSON envelope carrying the agent response, tool trace, and resulting state; per-session in-memory state (see the AgentCore persistence limitation above).
+- AgentCore deployment: the same Strands agent hosted on Amazon Bedrock AgentCore Runtime (CodeZip, `ca-central-1`), invoked through the AgentCore `/invocations` protocol with a JSON envelope carrying the agent response, tool trace, and resulting state; the deployed runtime persists the event log in DynamoDB (see [Persistence](#persistence)).
 - Demo/presentation readiness: seeded demo shift, a presentation view, a demo-flow guide in the header, a reset/seed script, and a headless-Chrome screenshot script producing `docs/stills/`.
 - Durable operational event history for the deployed AgentCore runtime in a single DynamoDB table, selected with `SHIFT_STORE`, with the domain fold unchanged.
 - Decision provenance and explicit reopen: decisions and reopens are append-only, attributed (`actor` plus optional `note`/`reason`), and auditable; a reopen returns an item to conflict without touching the original decision, and both are gated by deterministic authorization that the model cannot fabricate.
@@ -577,8 +602,10 @@ scripts/
   resetDemo.ts             reset + verify the frozen demo state for a recording take
   seedDemo.ts              seed demo data without wiping (+ one photo-evidence report)
   captureScreenshots.ts    headless-Chrome capture of the demo stills
+  captureCard.ts           render a static HTML card (e.g. the architecture diagram) to PNG
 docs/
   ARCHITECTURE.md          boundaries + mermaid diagrams
+  architecture.html        the README diagram's source — regenerate with `npm run diagram`
   RECORDING_GUIDE.md       commands, viewport lock, exact turns, framing
   SHOT_LIST.md             shot-by-shot plan for the ~3:45 video
   AI_VIDEO_PROMPTS.md      per-still motion prompts, durations, transitions, placement
