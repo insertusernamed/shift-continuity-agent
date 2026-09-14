@@ -71,9 +71,14 @@ shot-by-shot plan are in [`docs/RECORDING_GUIDE.md`](./docs/RECORDING_GUIDE.md) 
 
 ## Run locally
 
-Requires Node.js 22+.
+Requires Node.js 22+ and nothing else — no database, no AWS account, no model
+credentials. Without any configuration the app runs fully offline.
+
+From a fresh clone:
 
 ```bash
+git clone https://github.com/insertusernamed/shift-continuity-agent.git
+cd shift-continuity-agent
 npm install
 npm run dev        # dev server with auto-reload at http://127.0.0.1:7787
 ```
@@ -259,7 +264,9 @@ Both paths use `src/agent/*` and `src/domain/*` unchanged.
 
 - Node.js 22+ (the runtime target is `NODE_22`)
 - `npm install -g @aws/agentcore` (CLI used here: **0.28.1**)
-- AWS credentials via the normal chain: `AWS_PROFILE=shift-handoff`
+- AWS credentials via the normal chain — any profile with Bedrock and AgentCore
+  permissions. The commands below pass `AWS_PROFILE=shift-handoff`, the profile this
+  deployment happens to use; substitute your own.
 - Region: `ca-central-1` (configured in `agentcore/aws-targets.json`)
 - Model: `global.anthropic.claude-haiku-4-5-20251001-v1:0`, provider `bedrock`
   (configured as runtime `envVars` in `agentcore/agentcore.json`)
