@@ -11,7 +11,8 @@
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
     "test": "tsx --test \"src/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "diagram": "tsx scripts/captureCard.ts docs/architecture.html docs/architecture.png 1560 1300"
   },
   "devDependencies": {
     "@aws-sdk/client-bedrock-agentcore": "^3.1130.0",

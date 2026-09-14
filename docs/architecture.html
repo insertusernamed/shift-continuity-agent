@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Shift Handoff — architecture</title>
+<!--
+  Architecture diagram for the README. Render it with the existing card helper:
+
+    npx tsx scripts/captureCard.ts docs/architecture.html docs/architecture.png 1560 1260
+
+  WHY HTML/CSS rather than a diagram library: this is a diagram whose job is to be
+  *read*, so typography, spacing and contrast are the design, and generic
+  diagram-as-code themes do not expose them. It is also deliberately not an editor
+  artifact — it is text in the repository, so it diffs, reviews, and regenerates
+  like everything else. No JavaScript, no webfonts, no dependencies.
+
+  Design follows Apple's Human Interface Guidelines, applied to a static diagram:
+    - System font (San Francisco on Apple platforms) via the platform font stack.
+    - A single type ramp with three weights (400 / 600 / 700) and no text smaller
+      than 12.5px; hierarchy comes from size, weight and space, not from colour.
+    - Uppercase labels carry letter-spacing, which is what makes small caps legible.
+    - Body copy sits at ~1.45 line height; display sizes are tracked tighter than
+      body sizes, per the usual optical rule.
+    - Nothing is conveyed by colour alone: lanes are labelled, stages are numbered,
+      the human-authority path is dashed *and* worded, and status shows a glyph
+      with its word.
+    - Contrast is not eyeballed. Every text pair below is >= 4.5:1 and every
+      meaningful boundary is >= 3:1 (see the measured numbers in docs/ARCHITECTURE.md).
+    - No animation anywhere, so there is nothing to respect a reduced-motion
+      preference for.
+  The type ramp is ~1.35x a 1:1 UI ramp on purpose: this PNG is 1560px wide and is
+  normally displayed smaller, so sizes are chosen to survive that downscale.
+-->
+<style>
+  :root {
+    /* Palette is copied from the product's own tokens (src/http/ui.ts :root), so the
+       diagram and the app cannot drift apart visually. */
+    --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+    --ink-1: #0f1319;
+    --ink-2: #3b444f;
+    --ink-3: #5f6874;
+    --surface-0: #f1f3f6;
+    --surface-1: #ffffff;
+    --surface-2: #f7f9fb;
+    --surface-3: #eaeef2;
+    --line-1: #dbe0e7;
+    --line-2: #e9edf1;
+    --line-strong: #7a848f;
+
+    --accent: #1c4a70;
+    --accent-ink: #163d5d;
+    --accent-soft: #eaf1f7;
+    --conflict-ink: #9d1f28;
+    --conflict-bg: #fdeeef;
+    --conflict-line: #f0cfd3;
+    --decided-ink: #14507f;
+    --decided-bg: #eaf1f8;
+    --decided-line: #cbdceb;
+    --open-ink: #8a4a05;
+    --open-bg: #fdf3e4;
+    --open-line: #edd4ad;
+    --ok-ink: #2f6b49;
+    --ok-bg: #f2f8f4;
+    --ok-line: #cfe4d8;
+
+    --gutter: 84px;
+    --lane-pad: 16px;
+    --radius: 10px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { width: 1560px; height: 1300px; }
+  body {
+    width: 1560px; height: 1300px; overflow: hidden;
+    background: var(--surface-0);
+    color: var(--ink-1);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    padding: 44px 48px 32px;
+    display: flex; flex-direction: column;
+  }
+
+  h1, h2, h3 { font-weight: 600; }
+
+  /* ------------------------------------------------------------------ masthead */
+  header.masthead { display: flex; align-items: flex-start; justify-content: space-between; gap: 32px; }
+  .wordmark { display: flex; align-items: center; gap: 14px; }
+  .mark {
+    width: 42px; height: 42px; border-radius: 9px; background: var(--accent); color: #fff;
+    font-size: 17px; font-weight: 700; letter-spacing: -0.01em; display: grid; place-items: center;
+  }
+  .masthead h1 { font-size: 29px; font-weight: 700; letter-spacing: -0.021em; line-height: 1.1; }
+  .masthead .tagline { font-size: 15.5px; color: var(--ink-2); margin-top: 3px; }
+
+  .badge {
+    display: flex; align-items: center; gap: 8px; white-space: nowrap;
+    border: 1px solid var(--line-1); background: var(--surface-1); color: var(--ink-2);
+    border-radius: 999px; padding: 6px 15px 6px 13px; font-size: 12.5px; font-weight: 500;
+  }
+  .badge .live { width: 7px; height: 7px; border-radius: 50%; background: var(--ok-ink); }
+
+  .rule { border: 0; border-top: 1px solid var(--line-1); margin: 20px 0 0; }
+
+  /* -------------------------------------------------------------------- layout
+     Two independent columns. They are separate grid items rather than shared
+     rows because their contents have unrelated heights, and the diagram only
+     needs their tops to line up. */
+  .grid {
+    flex: 1; min-height: 0; display: grid;
+    grid-template-columns: 812px var(--gutter) 568px;
+    align-items: start; margin-top: 30px;
+  }
+  .flow { grid-column: 1; display: flex; flex-direction: column; }
+  .aside { grid-column: 3; display: flex; flex-direction: column; gap: 24px; }
+
+  /* ------------------------------------------------------------- flow: stages */
+  .node {
+    position: relative; background: var(--surface-1); border: 1.5px solid var(--line-strong);
+    border-left: 4px solid var(--line-strong); border-radius: var(--radius);
+    padding: 12px 18px; display: flex; align-items: center; gap: 16px;
+  }
+  .node--human { border-left-color: var(--ink-3); }
+  .node .num {
+    flex: none; width: 30px; height: 30px; border-radius: 6px; background: var(--surface-3);
+    color: var(--ink-2); font-family: var(--font-mono); font-size: 14px; font-weight: 600;
+    display: grid; place-items: center;
+  }
+  .node .text { min-width: 0; }
+  .node .text h3 { font-size: 18.5px; letter-spacing: -0.011em; line-height: 1.25; }
+  .node .text p { font-size: 14px; line-height: 1.45; color: var(--ink-3); margin-top: 3px; }
+  .node .text p + p { margin-top: 2px; }
+  .node code { font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); }
+
+  .pill {
+    margin-left: auto; flex: none; white-space: nowrap; border: 1px solid var(--line-1);
+    background: var(--surface-2); color: var(--ink-2); border-radius: 999px;
+    padding: 5px 13px; font-size: 12.5px; font-weight: 500;
+  }
+  .tag {
+    margin-left: auto; flex: none; font-size: 11.5px; font-weight: 700; letter-spacing: 0.13em;
+    text-transform: uppercase; color: var(--decided-ink);
+  }
+
+  /* Lanes group stages without shouting: a labelled header bar, a slightly raised
+     surface, and a hairline border carry the grouping. */
+  .lane { background: var(--surface-2); border: 1px solid var(--line-1); border-radius: 12px; }
+  .lane > .laneHead {
+    display: flex; align-items: center; gap: 10px; padding: 11px var(--lane-pad) 0;
+  }
+  .lane > .laneHead .note { margin-left: auto; font-size: 12px; font-weight: 500; color: var(--ink-3); }
+  .lane > .laneHead .rail { width: 14px; height: 3px; border-radius: 2px; background: var(--line-strong); }
+  .lane--model > .laneHead .rail { background: var(--accent); }
+  .lane > .laneHead h2 {
+    font-size: 12px; font-weight: 700; letter-spacing: 0.125em; text-transform: uppercase; color: var(--ink-3);
+  }
+  .lane > ol { list-style: none; padding: var(--lane-pad); display: flex; flex-direction: column; }
+  .lane--model > ol .node { border-left-color: var(--accent); }
+  .lane--model > ol .node .num { background: var(--accent-soft); color: var(--accent-ink); }
+
+  .connector { display: flex; justify-content: center; height: 22px; }
+  .connector i {
+    width: 2px; height: 100%;
+    background: linear-gradient(to bottom, var(--line-strong) 0, var(--line-strong) 100%);
+  }
+  .connector { align-items: center; }
+  .connector::after {
+    content: ""; width: 0; height: 0; margin-left: -1px;
+    border-left: 5px solid transparent; border-right: 5px solid transparent;
+    border-top: 7px solid var(--line-strong);
+  }
+  .connector i { height: 15px; }
+
+  /* The fork below the human node: one path carries reports, the other carries
+     authority. They leave the same node and end in different places, which is the
+     whole architectural point, so they are drawn differently (solid vs dashed,
+     grey vs accent) and worded differently. */
+  /* One branch per transition, centred over the flow column. Deliberately not a
+     full-width grid: a branch that reached into the side column would draw on top
+     of the gate card, because the two columns are independent stacks. */
+  .fork { display: flex; align-items: center; justify-content: center; height: 56px; }
+  .branch { display: flex; align-items: center; gap: 12px; }
+  .branch .stem { width: 2px; height: 30px; position: relative; flex: none; }
+  .branch .stem::after {
+    content: ""; position: absolute; left: 50%; bottom: -8px; transform: translateX(-50%);
+    border-left: 5px solid transparent; border-right: 5px solid transparent;
+  }
+  .branch--report .stem { background: var(--line-strong); }
+  .branch--report .stem::after { border-top: 7px solid var(--line-strong); }
+  .branch span.label { font-size: 13px; font-weight: 500; color: var(--ink-2); }
+
+  /* The contract band is a boundary, not a stage: dashed edge, no number. */
+  .band {
+    border: 1.5px dashed var(--line-strong); border-radius: var(--radius);
+    background: var(--surface-1); padding: 12px 18px; display: flex; align-items: center; gap: 14px;
+  }
+  .band .eyebrow {
+    flex: none; font-size: 11.5px; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase;
+    color: var(--accent-ink); background: var(--accent-soft); border-radius: 5px; padding: 4px 9px;
+  }
+  .band p { font-size: 14px; line-height: 1.4; color: var(--ink-2); }
+  .band b { font-weight: 600; color: var(--ink-1); }
+
+  /* ------------------------------------------------- authority crossings -----
+     These are anchored to their own row and reach across the gutter, so they stay
+     correct if the rows above change height. Width is derived from the grid, not
+     hardcoded, so it survives a gutter change too. */
+  .cross {
+    position: absolute; left: 100%; top: 0; height: 100%;
+    width: calc(var(--gutter) + var(--lane-pad));
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  /* The caption is taken out of flow so the connector itself stays centred on the
+     row it leaves, and reads as coming out of the middle of that row. */
+  .cross .caption {
+    position: absolute; left: 0; bottom: calc(50% + 9px);
+    padding-left: 2px; font-size: 11.5px; font-weight: 600; line-height: 1.2;
+  }
+  .cross .caption b { display: block; }
+  .cross .caption small { display: block; margin-top: 1px; font-size: 11px; font-weight: 500; color: var(--ink-3); }
+  .cross .rule-line { display: flex; align-items: center; }
+  .cross .rule-line i { flex: 1; height: 2px; }
+  .cross .head { flex: none; width: 0; height: 0; }
+
+  .cross--attempt .caption { color: var(--ink-3); }
+  .cross--attempt .rule-line i { background: repeating-linear-gradient(to right, var(--line-strong) 0 6px, transparent 6px 11px); }
+  .cross--attempt .head { border-top: 5px solid transparent; border-bottom: 5px solid transparent; border-left: 7px solid var(--line-strong); }
+
+  .cross--append .caption { color: var(--ok-ink); }
+  .cross--append .rule-line i { background: var(--ok-ink); }
+  .cross--append .head { border-top: 5px solid transparent; border-bottom: 5px solid transparent; border-right: 7px solid var(--ok-ink); margin-right: -1px; }
+
+  /* The human's authority leaves the human and enters the gate card directly. It is
+     the accent-coloured, heaviest path in the diagram on purpose: authority is not a
+     side effect of the agent's flow. */
+  .cross--authority .caption { color: var(--accent-ink); }
+  .cross--authority .rule-line i { background: var(--accent); height: 2.5px; }
+  .cross--authority .head { border-top: 5px solid transparent; border-bottom: 5px solid transparent; border-left: 7px solid var(--accent); }
+
+  /* ------------------------------------------------------------------- cards */
+  .card { background: var(--surface-1); border: 1.5px solid var(--line-strong); border-radius: 12px; padding: 22px 24px; }
+  .card--gate { background: var(--conflict-bg); border-color: var(--conflict-line); border-left: 4px solid var(--conflict-ink); }
+  .card .eyebrow {
+    font-size: 11.5px; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase; color: var(--ink-3);
+  }
+  .card--gate .eyebrow { color: var(--conflict-ink); }
+  .card h2 { font-size: 19px; letter-spacing: -0.011em; line-height: 1.3; margin-top: 8px; }
+  .card p { font-size: 14px; line-height: 1.5; color: var(--ink-2); margin-top: 10px; }
+  .card p b { font-weight: 600; color: var(--ink-1); }
+  .card code { font-family: var(--font-mono); font-size: 12.5px; }
+
+  .verdicts { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+  .verdict {
+    display: flex; align-items: center; gap: 9px; border-radius: 8px; border: 1px solid;
+    padding: 9px 12px; font-size: 13px; font-weight: 600;
+  }
+  .verdict--ok { background: var(--ok-bg); border-color: var(--ok-line); color: var(--ok-ink); }
+  .verdict--no { background: var(--surface-1); border-color: var(--conflict-line); color: var(--conflict-ink); }
+  .verdict .arrowEnd { margin-left: auto; font-weight: 500; }
+
+  .divider { border: 0; border-top: 1px solid var(--conflict-line); margin: 20px 0 0; }
+  .card--plain .divider { border-top-color: var(--line-1); }
+
+  ul.limits { list-style: none; margin-top: 10px; }
+  ul.limits li {
+    position: relative; padding-left: 16px; font-size: 14px; line-height: 1.45; color: var(--ink-2);
+  }
+  ul.limits li + li { margin-top: 7px; }
+  ul.limits li::before {
+    content: ""; position: absolute; left: 2px; top: 7px; width: 5px; height: 5px;
+    border-radius: 50%; background: var(--conflict-ink);
+  }
+  ul.limits li code { color: var(--ink-1); }
+
+  /* Ownership rows: three columns of a small table, one per authority. */
+  .owners { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }  .owner { display: grid; grid-template-columns: 74px 1fr; gap: 14px; align-items: baseline; }
+  .owner .who {
+    font-size: 11.5px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3);
+  }
+  .owner .what { font-size: 14px; line-height: 1.4; color: var(--ink-2); }
+  .owner .what b { font-weight: 600; color: var(--ink-1); }
+
+  .closing {
+    margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--conflict-line);
+    font-size: 13.5px; line-height: 1.5; color: var(--ink-2);
+  }
+
+  .host { display: flex; align-items: baseline; gap: 12px; margin-top: 12px; }
+  .host .name {
+    flex: none; width: 168px; font-size: 12px; font-weight: 700; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--ink-2);
+  }
+  .host .path { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-2); }
+  .host .note { font-size: 13px; color: var(--ink-3); }
+
+  /* ------------------------------------------------------------------ footer */
+  footer {
+    margin-top: auto; padding-top: 18px; border-top: 1px solid var(--line-1);
+    display: flex; align-items: center; justify-content: space-between; gap: 32px;
+  }
+  .legend { display: flex; align-items: center; gap: 9px; }
+  .legend .eyebrow { font-size: 11.5px; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase; color: var(--ink-3); margin-right: 3px; }
+  .status {
+    display: flex; align-items: center; gap: 7px; border: 1px solid; border-radius: 999px;
+    padding: 5px 12px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
+  }
+  .status .glyph { font-size: 12px; }
+  .status--open { background: var(--open-bg); border-color: var(--open-line); color: var(--open-ink); }
+  .status--conflict { background: var(--conflict-bg); border-color: var(--conflict-line); color: var(--conflict-ink); }
+  .status--resolved { background: var(--ok-bg); border-color: var(--ok-line); color: var(--ok-ink); }
+  .status--decided { background: var(--decided-bg); border-color: var(--decided-line); color: var(--decided-ink); }
+  footer .gloss { font-size: 13px; color: var(--ink-2); }
+  footer .proof { font-size: 13px; color: var(--ink-3); text-align: right; }
+</style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="wordmark">
+      <div class="mark" aria-hidden="true">SH</div>
+      <div>
+        <h1>Shift Handoff — architecture</h1>
+        <p class="tagline">The model operates the product. The domain owns the truth.</p>
+      </div>
+    </div>
+    <div class="badge"><span class="live" aria-hidden="true"></span> Amazon Bedrock AgentCore Runtime · ca-central-1</div>
+  </header>
+
+  <hr class="rule" />
+
+  <div class="grid">
+    <!-- ==================================================== left: the pipeline -->
+    <div class="flow">
+      <section class="node node--human">
+        <span class="num" aria-hidden="true">1</span>
+        <div class="text">
+          <h3>Human / shift worker</h3>
+          <p>Reports an observation in plain language, or attaches a photo.</p>
+        </div>
+        <span class="pill">radio · scanner · photo</span>
+        <div class="cross cross--authority">
+          <span class="caption"><b>authority</b><small>not the model</small></span>
+          <span class="rule-line"><i aria-hidden="true"></i><span class="head" aria-hidden="true"></span></span>
+        </div>
+      </section>
+
+      <div class="fork">
+        <div class="branch branch--report">
+          <span class="stem" aria-hidden="true"></span>
+          <span class="label">reports an observation</span>
+        </div>
+      </div>
+
+      <section class="lane lane--model">
+        <div class="laneHead">
+          <span class="rail" aria-hidden="true"></span>
+          <h2>Model lane — proposes, owns nothing</h2>
+          <span class="note">Claude Haiku 4.5 on Amazon Bedrock</span>
+        </div>
+        <ol>
+          <li class="node" id="stage-agent">
+            <span class="num" aria-hidden="true">2</span>
+            <div class="text">
+              <h3>Shift Continuity Agent</h3>
+              <p><code>@strands-agents/sdk</code> — chooses which tool to call. It cannot invent current state.</p>
+            </div>
+          </li>
+
+          <li class="connector" aria-hidden="true"><i></i></li>
+
+          <li class="node">
+            <span class="num" aria-hidden="true">3</span>
+            <div class="text">
+              <h3>Typed tools</h3>
+              <p><code>report_event · get_shift_state · get_handoff · record_human_decision · reopen_human_decision</code></p>
+            </div>
+            <div class="cross cross--attempt">
+              <span class="caption"><b>✕ attempt</b><small>refused</small></span>
+              <span class="rule-line"><i aria-hidden="true"></i><span class="head" aria-hidden="true"></span></span>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <div class="fork" style="height:38px">
+        <div class="branch branch--report">
+          <span class="stem" aria-hidden="true"></span>
+          <span class="label">one interpreted sentence, never a state update</span>
+        </div>
+      </div>
+
+      <div class="band">
+        <span class="eyebrow">Contract</span>
+        <p><b>A candidate event, not truth.</b> Validated locally before anything is appended — and no model output can carry an id, a timestamp, or a shift id.</p>
+      </div>
+
+      <div class="fork" style="height:38px">
+        <div class="branch branch--report">
+          <span class="stem" aria-hidden="true"></span>
+          <span class="label">validated events</span>
+        </div>
+      </div>
+
+      <section class="lane lane--domain">
+        <div class="laneHead">
+          <span class="rail" aria-hidden="true"></span>
+          <h2>Domain lane — deterministic · no I/O · no framework · no LLM</h2>
+        </div>
+        <ol>
+          <li class="node">
+            <span class="num" aria-hidden="true">4</span>
+            <div class="text">
+              <h3>Validation</h3>
+              <p><code>validateEvent</code> — lifecycle rules: what may happen next, and what is refused.</p>
+            </div>
+          </li>
+
+          <li class="connector" aria-hidden="true"><i></i></li>
+
+          <li class="node" id="stage-events">
+            <span class="num" aria-hidden="true">5</span>
+            <div class="text">
+              <h3>Append-only operational events</h3>
+              <p>Nothing ever writes current state. History is never truncated, edited, or reordered.</p>
+            </div>
+            <div class="cross cross--append">
+              <span class="caption"><b>✓ authorized</b><small>append</small></span>
+              <span class="rule-line"><span class="head" aria-hidden="true"></span><i aria-hidden="true"></i></span>
+            </div>
+          </li>
+
+          <li class="connector" aria-hidden="true"><i></i></li>
+
+          <li class="node">
+            <span class="num" aria-hidden="true">6</span>
+            <div class="text">
+              <h3>Amazon DynamoDB — the durable log</h3>
+              <p>One immutable item per event, written conditionally. Re-read and re-folded on a cold start.</p>
+            </div>
+            <span class="tag">Storage</span>
+          </li>
+
+          <li class="connector" aria-hidden="true"><i></i></li>
+
+          <li class="node">
+            <span class="num" aria-hidden="true">7</span>
+            <div class="text">
+              <h3>Deterministic chronological fold</h3>
+              <p>Pure and synchronous, re-derived from the log on every read — so it cannot drift from history.</p>
+            </div>
+          </li>
+
+          <li class="connector" aria-hidden="true"><i></i></li>
+
+          <li class="node" style="border-left-color: var(--ok-ink)">
+            <span class="num" aria-hidden="true">8</span>
+            <div class="text">
+              <h3>Current state + handoff</h3>
+              <p>The next shift gets only what still requires action or human review.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+    </div>
+
+    <!-- =================================================== right: the boundary -->
+    <div class="aside">
+      <section class="card card--gate">
+        <p class="eyebrow">Human decision boundary</p>
+        <h2>Only a human may decide or reopen.</h2>
+        <p>Deciding a conflict and reopening a decision are human actions. The system never takes either on
+          its own, and the model cannot approve its own request.</p>
+        <p>Both tools refuse unless the current request names the item <b>and</b> the choice. That
+          authorization is detected deterministically <b>before the model runs</b>, and the tool re-checks
+          it — so the gate is model-independent by construction.</p>
+        <p>Who acted and why come from the application context, never from the model:
+          <code>reopen_human_decision</code> takes no actor argument at all.</p>
+
+        <div class="verdicts">
+          <p class="verdict verdict--ok">✓ Explicit request: item + choice <span class="arrowEnd">→ appended</span></p>
+          <p class="verdict verdict--no">✕ Anything else <span class="arrowEnd">→ refused, nothing written</span></p>
+        </div>
+
+        <hr class="divider" />
+        <p class="eyebrow">What the model cannot do</p>
+        <ul class="limits">
+          <li>Invent current state — it has to call <code>get_shift_state</code>.</li>
+          <li>Decide a conflict, or reopen a decision.</li>
+          <li>Fabricate authority, an actor, or a reason.</li>
+        </ul>
+
+        <hr class="divider" />
+        <p class="eyebrow">Who owns what</p>
+        <div class="owners">
+          <div class="owner"><span class="who">Model</span><span class="what">Interprets one sentence. <b>Chooses a tool.</b> Nothing else.</span></div>
+          <div class="owner"><span class="who">Domain</span><span class="what">Validates, appends, folds, gates authority, <b>builds the handoff.</b></span></div>
+          <div class="owner"><span class="who">Storage</span><span class="what">Keeps the events. <b>Never a second truth.</b></span></div>
+        </div>
+
+        <p class="closing">A refusal is not a failure: the item stays conflicted, and it stays in the handoff
+          until a human settles it.</p>
+      </section>
+
+      <section class="card card--plain">
+        <p class="eyebrow">One implementation, two hosts</p>
+        <div class="host">
+          <span class="name">Local app</span>
+          <span class="note">the operator UI and HTTP API — <span class="path">src/main.ts</span></span>
+        </div>
+        <div class="host">
+          <span class="name">AgentCore runtime</span>
+          <span class="note">the same agent over <span class="path">/invocations</span> — <span class="path">app/ShiftContinuityAgent</span></span>
+        </div>
+        <p>The runtime entrypoint is a thin adapter: parse the request, hydrate the store, invoke the agent,
+          return the reply with its tool trace. There is no second copy of the agent, the fold, or the gate.</p>
+      </section>
+    </div>
+  </div>
+
+  <footer>
+    <div class="legend">
+      <span class="eyebrow">Status</span>
+      <span class="status status--open"><span class="glyph" aria-hidden="true">●</span>Open</span>
+      <span class="status status--conflict"><span class="glyph" aria-hidden="true">▲</span>Conflict</span>
+      <span class="status status--resolved"><span class="glyph" aria-hidden="true">✓</span>Resolved</span>
+      <span class="status status--decided"><span class="glyph" aria-hidden="true">◆</span>Decided</span>
+      <span class="gloss">Only open work and conflicts reach the handoff.</span>
+    </div>
+    <p class="proof">Every claim on this page is covered by a network-free test suite;<br />the flow can also be read as text in <b>docs/ARCHITECTURE.md</b>.</p>
+  </footer>
+</body>
+</html>
